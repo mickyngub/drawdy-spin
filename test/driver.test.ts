@@ -4,6 +4,7 @@ import { SPIN_MS, planFor } from "../src/lib/animation-plan";
 import { DEFAULT_OPTIONS, computeResult } from "../src/lib/modes";
 import { FADE_MS, HOLD_MS } from "../src/lib/reveal";
 import { createSpin } from "../src/driver";
+import { overlaps } from "../src/lib/free-spot";
 import { DEFAULT_SETTINGS } from "../src/shared/messages";
 import { boot, fakeHost, overlayConfig, type FakeHost } from "./fake-host";
 
@@ -272,7 +273,7 @@ test("the spinner's own echo of the card does not start a second overlay", async
     assert.equal(host.sentOf("command:dom:create-floating-element").length, 1);
 });
 
-test("a wheel over stickies selects the winning sticky and flies to it after the reveal", async (t) => {
+async function stickySpin(t: TestContext, x: number) {
     const tick = clock(t);
     const host = fakeHost();
     for (const id of ["a", "b", "c"])
@@ -280,8 +281,10 @@ test("a wheel over stickies selects the winning sticky and flies to it after the
             drawdyElementId: id,
             type: "shape",
             componentType: "sticky-note",
-            x: 5000,
-            y: 5000,
+            x,
+            y: 100,
+            width: 200,
+            height: 193,
             text: `Topic ${id}`,
         });
     const { open, message } = await boot(createSpin({ seed: () => 31 }), host);
@@ -297,15 +300,27 @@ test("a wheel over stickies selects the winning sticky and flies to it after the
     const { index } = computeResult("wheel", 31, 3, DEFAULT_OPTIONS) as {
         index: number;
     };
-    assert.equal(host.sentOf("command:camera:fly-to-elements").length, 0);
+    assert.equal(host.sentOf("command:scene:set-selection").length, 0);
     tick(SPIN_MS + HOLD_MS);
     await settle(host);
-    const winner = ["a", "b", "c"][index];
+    return { host, winner: ["a", "b", "c"][index] };
+}
+
+test("a wheel over stickies selects the winning sticky after the reveal and flies to it when it is out of view", async (t) => {
+    const { host, winner } = await stickySpin(t, 5000);
     assert.deepEqual(host.selection, [winner]);
-    assert.deepEqual(
-        host.sentOf("command:camera:fly-to-elements")[0].req.drawdyElementIds,
-        [winner]
+    const [fly] = host.sentOf("command:camera:fly-to-rect");
+    assert.equal(fly.req.rect.x, 5000);
+    assert.ok(
+        fly.req.rect.width > 200,
+        "widened so the panel does not cover it"
     );
+});
+
+test("a winning sticky already in view is selected without moving the camera", async (t) => {
+    const { host, winner } = await stickySpin(t, 300);
+    assert.deepEqual(host.selection, [winner]);
+    assert.equal(host.sentOf("command:camera:fly-to-rect").length, 0);
 });
 
 test("dice, coin and warm-up need no entries and record no source", async (t) => {
@@ -368,4 +383,49 @@ test("a second spin while one is running is ignored", async (t) => {
     await message({ type: "spin", request: request() });
     await message({ type: "spin", request: request() });
     assert.equal(host.sentOf("command:scene:add-drawdy-elements").length, 1);
+});
+
+test("six spins in a row each land in view, clear of the panel, the host bars and each other", async (t) => {
+    const tick = clock(t);
+    const viewport = { x: 0, y: 0, width: 1600, height: 1000 };
+    const host = fakeHost({ viewport });
+    host.board.elements.set("note", {
+        drawdyElementId: "note",
+        type: "shape",
+        componentType: "sticky-note",
+        x: 520,
+        y: 380,
+        width: 300,
+        height: 240,
+    });
+    const { open, message } = await boot(createSpin(), host);
+    await open();
+    for (const mode of ["wheel", "order", "groups", "dice", "coin", "warmup"]) {
+        await message({ type: "spin", request: request({ mode }) });
+        tick(SPIN_MS + HOLD_MS + FADE_MS);
+        await settle(host);
+    }
+    const placed = host
+        .sentOf("command:scene:add-drawdy-elements")
+        .map((s) => s.req.elements[0]);
+    assert.equal(placed.length, 6);
+    const panelLeft = viewport.width - 336 - 16;
+    const rects = [host.board.elements.get("note"), ...placed].map((el) => ({
+        x: el!.x,
+        y: el!.y,
+        width: el!.width,
+        height: el!.height,
+    }));
+    for (const card of rects.slice(1)) {
+        assert.ok(card.x >= viewport.x);
+        assert.ok(card.y >= viewport.y + 64, "below the top bar");
+        assert.ok(card.x + card.width <= panelLeft, "clear of the panel");
+        assert.ok(
+            card.y + card.height <= viewport.y + viewport.height - 64,
+            "above the bottom bar"
+        );
+    }
+    for (let i = 0; i < rects.length; i++)
+        for (let j = i + 1; j < rects.length; j++)
+            assert.ok(!overlaps(rects[i], rects[j]), `${i} and ${j} overlap`);
 });

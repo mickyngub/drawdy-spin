@@ -11,12 +11,8 @@ import type {
 import { ACTION_BUTTON_SVG } from "./action-button";
 import { planFor } from "./lib/animation-plan";
 import { cardLayout, resultLabel } from "./lib/card";
-import {
-    centredIn,
-    findFreeRect,
-    visibleArea,
-    type Rect,
-} from "./lib/free-spot";
+import { findCardSpot } from "./lib/card-spot";
+import { centredIn, contains, visibleArea, type Rect } from "./lib/free-spot";
 import {
     MAX_ENTRIES,
     MIN_ENTRIES,
@@ -51,6 +47,7 @@ import { WEBVIEW_HTML } from "./webview-html";
 const SETTINGS_KEY = "settings";
 const CARD_PROPERTIES = ["meta", "opacity"] as const;
 const DRAWER_GAP_PX = 16;
+const HOST_BAR_PX = 64;
 const FLY_MS = 450;
 /** Frees the Spin button if a reveal never comes back, e.g. the card was deleted mid-spin. */
 const SPIN_TIMEOUT_MS = 7000;
@@ -121,7 +118,6 @@ export function createSpin(deps: Deps = {}): DriverModule {
     const seen = new Set<string>();
     const mine = new Map<string, Mine>();
     const overlays = new Map<string, string>();
-    const timers = new Set<ReturnType<typeof setTimeout>>();
 
     const stamp = () => ({ driverId, requestId: String(requestNo++) });
 
@@ -136,16 +132,13 @@ export function createSpin(deps: Deps = {}): DriverModule {
     }
 
     function later(at: number, task: () => Promise<void> | void): void {
-        const timer = setTimeout(
-            () => {
-                timers.delete(timer);
+        setTimeout(
+            () =>
                 void Promise.resolve()
                     .then(task)
-                    .catch(() => undefined);
-            },
+                    .catch(() => undefined),
             Math.max(0, at - Date.now())
         );
-        timers.add(timer);
     }
 
     async function post(message: DriverToWebview): Promise<boolean> {
@@ -285,6 +278,24 @@ export function createSpin(deps: Deps = {}): DriverModule {
         for (const el of got.res.value.drawdyElements) onCard(el);
     }
 
+    /** The part of the view a card can land in: left of the panel and between the host's top and bottom bars. */
+    async function boardArea(): Promise<Rect | null> {
+        const area = await visibleArea(placeCtx());
+        if (!area) return null;
+        const camera = await send({
+            type: "command:camera:get-info",
+            ...stamp(),
+        });
+        const zoom =
+            camera.res.error === undefined && camera.res.value.zoom > 0
+                ? camera.res.value.zoom
+                : 1;
+        const bar = HOST_BAR_PX / zoom;
+        return area.height > 4 * bar
+            ? { ...area, y: area.y + bar, height: area.height - 2 * bar }
+            : area;
+    }
+
     function failSpin(reason: ErrorReason): void {
         spinning = false;
         void post({ type: "error", reason });
@@ -303,7 +314,7 @@ export function createSpin(deps: Deps = {}): DriverModule {
                       label: typeof label === "string" ? cleanLabel(label) : "",
                       stickyId:
                           source === "stickies"
-                              ? (request.stickyIds?.[i] ?? null)
+                              ? request.stickyIds?.[i] || null
                               : null,
                   }))
                   .filter((p) => p.label !== "")
@@ -326,15 +337,13 @@ export function createSpin(deps: Deps = {}): DriverModule {
             result,
         };
         const layout = cardLayout(draft);
-        const area = await visibleArea(placeCtx());
+        const area = await boardArea();
         const centred: Rect = area
             ? centredIn(area, layout.width, layout.height)
             : { x: 0, y: 0, width: layout.width, height: layout.height };
-        const { x, y } = await findFreeRect(placeCtx(), {
-            ...centred,
-            x: Math.round(centred.x),
-            y: Math.round(centred.y),
-        });
+        const { x, y } = area
+            ? await findCardSpot(placeCtx(), centred, area)
+            : centred;
 
         // The timeline starts once the card goes out, not when the panel asked.
         const meta: SpinMeta = { ...draft, startedAt: Date.now() };
@@ -532,21 +541,43 @@ export function createSpin(deps: Deps = {}): DriverModule {
         });
         spinning = false;
         await post({ type: "landed", cardId });
-        if (!own?.stickyId) return;
+        if (own?.stickyId) await showSticky(own.stickyId);
+    }
+
+    /** Selects the winning sticky and, if it is out of view, flies to it, clear of the panel. */
+    async function showSticky(id: string): Promise<void> {
         await send({
             type: "command:scene:set-selection",
             ...stamp(),
-            req: { drawdyElementIds: [own.stickyId] },
+            req: { drawdyElementIds: [id] },
         });
-        const camera = await send({
-            type: "command:camera:get-info",
+        const rects = await send({
+            type: "command:scene:element-rects",
             ...stamp(),
+            req: { drawdyElementIds: [id] },
         });
+        const rect =
+            rects.res.error === undefined
+                ? rects.res.value.rects[0]?.rect
+                : undefined;
+        if (!rect) return;
+        const area = await boardArea();
+        if (area && contains(area, rect)) return;
+        const [view, camera] = await Promise.all([
+            send({ type: "command:camera:get-viewport-rect", ...stamp() }),
+            send({ type: "command:camera:get-info", ...stamp() }),
+        ]);
+        const covered =
+            area && view.res.error === undefined
+                ? view.res.value.rect.x +
+                  view.res.value.rect.width -
+                  (area.x + area.width)
+                : 0;
         await send({
-            type: "command:camera:fly-to-elements",
+            type: "command:camera:fly-to-rect",
             ...stamp(),
             req: {
-                drawdyElementIds: [own.stickyId],
+                rect: { ...rect, width: rect.width + Math.max(0, covered) },
                 flyDurationMs: FLY_MS,
                 zoom:
                     camera.res.error === undefined && camera.res.value.zoom > 0
