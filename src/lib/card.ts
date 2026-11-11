@@ -107,7 +107,7 @@ export function cardLayout(spin: SpinMeta): CardLayout {
               : 240;
     const lines = wrappedLines(text, width, fontSize);
     const height = Math.max(
-        short ? 130 : 193,
+        short ? 110 : 150,
         Math.round(PAD_Y + lines * fontSize * LINE)
     );
     return {

@@ -21,8 +21,10 @@ import {
 } from "../src/lib/animation-plan";
 import {
     designSize,
+    groupBoxHeight,
     groupColumns,
     GROUP_NAMES_SHOWN,
+    MARGIN,
     type OverlayConfig,
 } from "../src/lib/overlay-layout";
 
@@ -111,8 +113,8 @@ function wrap(text: string, maxWidth: number, maxLines: number): string[] {
 function card(x: number, y: number, w: number, h: number, r = 16): void {
     ctx.save();
     ctx.shadowColor = dark ? "rgba(0,0,0,0.5)" : "rgba(0,0,0,0.18)";
-    ctx.shadowBlur = 28;
-    ctx.shadowOffsetY = 10;
+    ctx.shadowBlur = 22;
+    ctx.shadowOffsetY = 8;
     ctx.fillStyle = colours.panel;
     ctx.beginPath();
     ctx.roundRect(x, y, w, h, r);
@@ -160,7 +162,7 @@ const segmentColour = (i: number, n: number): string =>
 
 function drawWheel(p: WheelPlan, t: number): void {
     const cx = design.width / 2;
-    const cy = 232;
+    const cy = 254;
     const R = 182;
     const n = p.labels.length;
     const seg = 360 / n;
@@ -315,21 +317,26 @@ function drawWheel(p: WheelPlan, t: number): void {
     );
 }
 
-function drawOrder(p: OrderPlan, t: number): void {
-    const w = design.width - 24;
-    card(12, 12, w, design.height - 24);
+function framedCard(title: string): number {
+    const w = design.width - 2 * MARGIN;
+    card(MARGIN, MARGIN, w, design.height - 2 * MARGIN);
     ctx.font = font(15, 650);
     ctx.fillStyle = colours.fg;
     ctx.textAlign = "left";
     ctx.textBaseline = "alphabetic";
-    ctx.fillText("Order", 32, 46);
+    ctx.fillText(title, MARGIN + 20, MARGIN + 34);
+    return w;
+}
+
+function drawOrder(p: OrderPlan, t: number): void {
+    const w = framedCard("Order");
     const rows = orderRowsShown(p.labels.length);
     for (let r = 0; r < rows; r++) {
-        const y = 76 + r * 34;
+        const y = MARGIN + 64 + r * 34;
         const locked = t >= p.lockAt[r];
         const s = locked ? popScale(t - p.lockAt[r]) : 1;
         ctx.save();
-        ctx.translate(32, y);
+        ctx.translate(MARGIN + 20, y);
         ctx.scale(s, s);
         ctx.fillStyle = locked ? colours.accent : colours.line;
         ctx.beginPath();
@@ -359,27 +366,18 @@ function drawOrder(p: OrderPlan, t: number): void {
         ctx.textBaseline = "middle";
         ctx.fillText(
             `+ ${p.labels.length - rows} more on the card`,
-            32,
-            76 + rows * 34 + 4
+            MARGIN + 20,
+            MARGIN + 64 + rows * 34 + 4
         );
     }
 }
 
 function drawGroups(p: GroupsPlan, t: number): void {
-    const W = design.width;
-    card(12, 12, W - 24, design.height - 24);
-    ctx.font = font(15, 650);
-    ctx.fillStyle = colours.fg;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillText(`${p.groups.length} groups`, 32, 46);
-
+    const w = framedCard(`${p.groups.length} groups`);
     const g = p.groups.length;
     const cols = groupColumns(g);
-    const longest = Math.max(...p.groups.map((x) => x.length));
-    const lines = Math.min(longest, GROUP_NAMES_SHOWN + 1);
-    const boxH = 44 + lines * 22;
-    const boxW = (W - 56 - (cols - 1) * 12) / cols;
+    const boxH = groupBoxHeight(p.groups);
+    const boxW = (w - 32 - (cols - 1) * 12) / cols;
     const dealt = groupsDealt(p, t);
     const shown = new Map<number, number>();
     for (let i = 0; i < dealt; i++) {
@@ -388,8 +386,8 @@ function drawGroups(p: GroupsPlan, t: number): void {
     }
 
     for (let k = 0; k < g; k++) {
-        const x = 28 + (k % cols) * (boxW + 12);
-        const y = 62 + Math.floor(k / cols) * (boxH + 12);
+        const x = MARGIN + 16 + (k % cols) * (boxW + 12);
+        const y = MARGIN + 50 + Math.floor(k / cols) * (boxH + 12);
         ctx.fillStyle = dark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)";
         ctx.beginPath();
         ctx.roundRect(x, y, boxW, boxH, 10);
@@ -618,17 +616,11 @@ function drawCoin(p: CoinPlan, t: number): void {
 }
 
 function drawWarmup(p: WarmupPlan, t: number): void {
-    const W = design.width;
-    card(12, 12, W - 24, design.height - 24);
-    ctx.font = font(15, 650);
-    ctx.fillStyle = colours.fg;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillText(p.lang === "th" ? "คำถามอุ่นเครื่อง" : "Warm-up", 32, 46);
-    const top = 62;
-    const height = design.height - top - 34;
-    const left = 32;
-    const width = W - 64;
+    const w = framedCard(p.lang === "th" ? "คำถามอุ่นเครื่อง" : "Warm-up");
+    const top = MARGIN + 50;
+    const height = design.height - 2 * MARGIN - 50 - 30;
+    const left = MARGIN + 20;
+    const width = w - 40;
     const pos = reelAt(p, t);
     const base = Math.floor(pos);
     const frac = pos - base;
@@ -655,7 +647,7 @@ function drawWarmup(p: WarmupPlan, t: number): void {
         const u = easeOutCubic((t - SPIN_MS) / 300);
         ctx.fillStyle = colours.accent;
         ctx.beginPath();
-        ctx.roundRect(left, design.height - 34, (width / 3) * u, 4, 2);
+        ctx.roundRect(left, design.height - MARGIN - 22, (width / 3) * u, 4, 2);
         ctx.fill();
     }
 }

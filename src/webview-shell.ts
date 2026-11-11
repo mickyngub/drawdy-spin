@@ -56,37 +56,6 @@ const BODY = `
             <div id="modes" role="group" aria-labelledby="mode-label" class="${OPTION_GRID}">${MODE_BUTTONS}</div>
             <p id="mode-hint" class="${HINT}"></p>
         </section>
-        <section id="source-section" class="${SECTION}">
-            <div class="${LABEL_ROW}"><span>Pick from</span><span id="entry-count" class="text-fg-subtle tabular-nums" data-count="0"></span></div>
-            ${track("sources", "Pick from", "source", [
-                ["people", "People here"],
-                ["stickies", "Stickies"],
-                ["list", "List"],
-            ])}
-            <div data-pane="people" class="flex flex-col gap-2">
-                <div id="people" class="flex flex-wrap gap-1.5 empty:hidden"></div>
-                <div id="people-alone" class="${EMPTY}" hidden>
-                    ${icon(ICONS.user, "size-5 text-fg-subtle")}
-                    <span class="text-label text-fg">Only you are here</span>
-                    <span class="${HINT}">The wheel needs at least 2 people on the board. You can type names instead.</span>
-                    <button type="button" id="type-names" class="${SECONDARY} mt-2">Type names</button>
-                </div>
-                <p id="people-blocked" class="${NOTICE}" hidden>Spin can't see who's on the board. Allow it under Manage permissions, or type the names in a list.</p>
-            </div>
-            <div data-pane="stickies" class="flex flex-col gap-2" hidden>
-                <div id="stickies" class="flex flex-wrap gap-1.5 empty:hidden"></div>
-                <div id="stickies-empty" class="${EMPTY}">
-                    ${icon(ICONS.sticky, "size-5 text-fg-subtle")}
-                    <span class="text-label text-fg">Select 2 or more stickies</span>
-                    <span class="${HINT}">Spin uses the first line of each one.</span>
-                </div>
-                <p id="stickies-hint" class="${HINT}" hidden>Select 2 or more other stickies to change the list.</p>
-            </div>
-            <div data-pane="list" class="flex flex-col gap-2" hidden>
-                <textarea id="list" class="${TEXTAREA}" rows="6" spellcheck="false" placeholder="Mali&#10;Ben&#10;Sara" aria-label="Names or options, one per line"></textarea>
-                <p class="${HINT}">One per line. Spin keeps the list for next time.</p>
-            </div>
-        </section>
         <section id="groups-section" class="${SECTION}" hidden>
             <div class="${LABEL_ROW}"><span>Split</span><span id="groups-preview" class="truncate text-fg-subtle"></span></div>
             ${track("groups-by", "Split by", "groups-by", [
@@ -118,6 +87,37 @@ const BODY = `
                 ["en", "English"],
                 ["th", "ไทย"],
             ])}
+        </section>
+        <section id="source-section" class="${SECTION}">
+            <div class="${LABEL_ROW}"><span>Pick from</span><span id="entry-count" class="text-fg-subtle tabular-nums" data-count="0"></span></div>
+            ${track("sources", "Pick from", "source", [
+                ["people", "People here"],
+                ["stickies", "Stickies"],
+                ["list", "List"],
+            ])}
+            <div data-pane="people" class="flex flex-col gap-2">
+                <div id="people" class="flex flex-wrap gap-1.5 empty:hidden"></div>
+                <div id="people-alone" class="${EMPTY}" hidden>
+                    ${icon(ICONS.user, "size-5 text-fg-subtle")}
+                    <span class="text-label text-fg">Only you are here</span>
+                    <span class="${HINT}">The wheel needs at least 2 people on the board. You can type names instead.</span>
+                    <button type="button" id="type-names" class="${SECONDARY} mt-2">Type names</button>
+                </div>
+                <p id="people-blocked" class="${NOTICE}" hidden>Spin can't see who's on the board. Allow it under Manage permissions, or type the names in a list.</p>
+            </div>
+            <div data-pane="stickies" class="flex flex-col gap-2" hidden>
+                <div id="stickies" class="flex flex-wrap gap-1.5 empty:hidden"></div>
+                <div id="stickies-empty" class="${EMPTY}">
+                    ${icon(ICONS.sticky, "size-5 text-fg-subtle")}
+                    <span class="text-label text-fg">Select 2 or more stickies</span>
+                    <span class="${HINT}">Spin uses the first line of each one.</span>
+                </div>
+                <p id="stickies-hint" class="${HINT}" hidden>Select 2 or more other stickies to change the list.</p>
+            </div>
+            <div data-pane="list" class="flex flex-col gap-2" hidden>
+                <textarea id="list" class="${TEXTAREA}" rows="6" spellcheck="false" placeholder="Mali&#10;Ben&#10;Sara" aria-label="Names or options, one per line"></textarea>
+                <p class="${HINT}">One per line. Spin keeps the list for next time.</p>
+            </div>
         </section>
         <label class="inline-flex cursor-pointer items-center gap-2 text-label text-fg-muted">
             <span class="relative grid place-items-center">

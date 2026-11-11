@@ -32,34 +32,44 @@ export function groupColumns(groups: number): number {
     return 3;
 }
 
+/** Room around a card for its shadow, which the iframe would otherwise clip. */
+export const MARGIN = 32;
+
+export function groupBoxHeight(groups: readonly string[][]): number {
+    const longest = Math.max(...groups.map((g) => g.length));
+    return 44 + Math.min(longest, GROUP_NAMES_SHOWN + 1) * 22;
+}
+
 export function designSize(plan: AnimationPlan): Size {
+    const framed = (width: number, height: number): Size => ({
+        width: width + 2 * MARGIN,
+        height: height + 2 * MARGIN,
+    });
     switch (plan.mode) {
         case "wheel":
-            return { width: 420, height: 480 };
+            return { width: 460, height: 530 };
         case "order": {
             const rows = orderRowsShown(plan.labels.length);
             const more = plan.labels.length > ORDER_ROWS ? 30 : 0;
-            return { width: 340, height: 76 + rows * 34 + more };
+            return framed(316, 60 + rows * 34 + more);
         }
         case "groups": {
             const cols = groupColumns(plan.groups.length);
             const rows = Math.ceil(plan.groups.length / cols);
-            const longest = Math.max(...plan.groups.map((g) => g.length));
-            const lines = Math.min(longest, GROUP_NAMES_SHOWN + 1);
-            const box = 44 + lines * 22;
-            return {
-                width: cols === 1 ? 280 : cols === 2 ? 440 : 560,
-                height: 72 + rows * box + (rows - 1) * 12,
-            };
+            const box = groupBoxHeight(plan.groups);
+            return framed(
+                cols === 1 ? 256 : cols === 2 ? 416 : 536,
+                66 + rows * box + (rows - 1) * 12
+            );
         }
         case "dice": {
             const n = plan.faces.length;
-            return { width: n * 120 + (n - 1) * 36 + 96, height: 330 };
+            return { width: n * 120 + (n - 1) * 36 + 96, height: 350 };
         }
         case "coin":
-            return { width: 300, height: 380 };
+            return { width: 300, height: 400 };
         case "warmup":
-            return { width: 480, height: 290 };
+            return framed(456, 266);
     }
 }
 
