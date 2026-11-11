@@ -1,0 +1,14 @@
+{
+    "driverId": "mickyngub.spin",
+    "driverName": "Spin",
+    "driverVersion": "1.0.0",
+    "description": "Who's next? Let the wheel decide. Click Spin to pick from the people on the board, the stickies you select or a list you type, and everyone on the board watches the same wheel land on the same answer. You can also shuffle an order, split into even groups, roll dice, flip a coin or draw a warm-up question in English or Thai. Each result stays as a sticky. Made for standups, workshops, retros and classrooms.",
+    "icon": "icon.png",
+    "main": "main.js",
+    "permissions": [
+        "dom",
+        "scene",
+        "storage",
+        "collaboration"
+    ]
+}
