@@ -22,7 +22,7 @@
     --color-chip-ink: #1f2550;
     --color-chip-soft: rgb(31 37 80 / 0.58);
     --color-lime: #c5f601;
-    --color-veil: light-dark(rgb(255 255 255 / 0.55), rgb(31 31 35 / 0.5));
+    --color-veil: light-dark(rgb(255 255 255 / 0.55), rgb(31 31 35 / 0.3));
     --color-slice-1: light-dark(#ffd3b5, #f9c7a4);
     --color-slice-2: light-dark(#fff0a3, #f6e38a);
     --color-slice-3: light-dark(#cdf3a9, #bfe897);
