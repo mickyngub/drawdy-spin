@@ -1,7 +1,7 @@
 {
     "name": "drawdy-spin",
-    "version": "1.0.0",
-    "description": "Spin for Drawdy: a picker wheel, dice, coin, groups and warm-up questions that land the same way on every screen on the board.",
+    "version": "2.0.0",
+    "description": "Spin for Drawdy: a picker wheel on the board that everyone watches turn and land on the same pick.",
     "license": "MIT",
     "private": true,
     "type": "module",
