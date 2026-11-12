@@ -1,4 +1,5 @@
 import { graphemes, initialOf, type Entry } from "../src/lib/entries";
+import { labelKind, labelLayout } from "../src/lib/labels";
 import { FACE, HUB_R, RESET_PILL, RIBBON_Y, WHEEL } from "../src/lib/layout";
 import { between, deriveSeed, mulberry32 } from "../src/lib/rng";
 import {
@@ -27,7 +28,6 @@ const CELEBRATE_MS = 2000;
 const POP_MS = 420;
 const BOUNCE_MS = 520;
 const CONFETTI = 72;
-const PICTURE_MAX = 10;
 const TAU = Math.PI * 2;
 
 const raw = document.getElementById("spin")?.textContent ?? "null";
@@ -47,7 +47,8 @@ const plan = planOf(wheel);
 const left = remaining(wheel).length;
 const resettable = canReset(wheel);
 const result = entryById(wheel, wheel.lastSpin?.result);
-const pictures = slices.length <= PICTURE_MAX;
+const pictures = labelKind(slices.length) === "arc";
+const flips = labelLayout(wheel).map((label) => label.flipped);
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 type Palette = {
@@ -224,8 +225,18 @@ function badge(entry: Entry, x: number, y: number, r: number, pop = 1): void {
     ctx.restore();
 }
 
-/** Text along the slice's outer arc, reading clockwise, shrunk then cut to fit. */
-function arcText(text: string, centreDeg: number, radius: number, max: number) {
+/**
+ * Text along the slice's outer arc, shrunk then cut to fit. It reads
+ * clockwise, or, when flipped for the lower half, the other way along the arc
+ * with its baseline toward the rim.
+ */
+function arcText(
+    text: string,
+    centreDeg: number,
+    radius: number,
+    max: number,
+    flipped: boolean
+) {
     let size = slices.length <= 6 ? 17 : 15;
     let parts: string[] = [];
     let widths: number[] = [];
@@ -250,34 +261,45 @@ function arcText(text: string, centreDeg: number, radius: number, max: number) {
         widths.push(dot);
     }
     const { cx, cy } = WHEEL;
-    let a = rad(centreDeg) - total() / (2 * radius);
+    const step = flipped ? -1 : 1;
+    let a = rad(centreDeg) - (step * total()) / (2 * radius);
     ctx.fillStyle = palette.chipInk;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     parts.forEach((g, i) => {
-        a += widths[i] / (2 * radius);
+        a += (step * widths[i]) / (2 * radius);
         ctx.save();
         ctx.translate(cx + radius * Math.cos(a), cy + radius * Math.sin(a));
-        ctx.rotate(a + Math.PI / 2);
+        ctx.rotate(a + (step * Math.PI) / 2);
         ctx.fillText(g, 0, 0);
         ctx.restore();
-        a += widths[i] / (2 * radius);
+        a += (step * widths[i]) / (2 * radius);
     });
 }
 
-function radialText(entry: Entry, centreDeg: number, seg: number): void {
+/** Text along the slice's radius, ending at the rim, or starting there when flipped for the left half. */
+function radialText(
+    entry: Entry,
+    centreDeg: number,
+    seg: number,
+    flipped: boolean
+): void {
     const { cx, cy, r } = WHEEL;
     const chord = ((r * 0.7 * seg * Math.PI) / 180) * 0.5;
     const size = Math.max(11, Math.min(16, Math.round(chord)));
     const label = entry.emoji ? `${entry.emoji} ${entry.text}` : entry.text;
     ctx.save();
     ctx.translate(cx, cy);
-    ctx.rotate(rad(centreDeg));
+    ctx.rotate(rad(centreDeg) + (flipped ? Math.PI : 0));
     ctx.font = font(size);
     ctx.fillStyle = palette.chipInk;
-    ctx.textAlign = "right";
+    ctx.textAlign = flipped ? "left" : "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(fit(label, r - HUB_R - 34), r - 16, 1);
+    ctx.fillText(
+        fit(label, r - HUB_R - 34),
+        flipped ? -(r - 16) : r - 16,
+        flipped ? -1 : 1
+    );
     ctx.restore();
 }
 
@@ -291,7 +313,7 @@ function drawLabels(angle: number, seg: number, f: Frame): void {
     slices.forEach((entry, i) => {
         const centre = angle + (i + 0.5) * seg;
         if (!pictures) {
-            radialText(entry, centre, seg);
+            radialText(entry, centre, seg, flips[i]);
             return;
         }
         const half = n === 1 ? Math.PI / 2 : (seg * Math.PI) / 360;
@@ -312,7 +334,7 @@ function drawLabels(angle: number, seg: number, f: Frame): void {
         );
         const textR = r * 0.84;
         const max = n === 1 ? r * 2 : textR * ((seg * Math.PI) / 180) * 0.86;
-        arcText(entry.text, n === 1 ? 180 : centre, textR, max);
+        arcText(entry.text, n === 1 ? 180 : centre, textR, max, flips[i]);
     });
 }
 
