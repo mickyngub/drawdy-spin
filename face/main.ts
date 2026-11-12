@@ -61,6 +61,7 @@ type Palette = {
     chipSoft: string;
     lime: string;
     veil: string;
+    win: string;
     slices: string[];
 };
 
@@ -80,6 +81,7 @@ function readPalette(): Palette {
         chipSoft: read("chip-soft"),
         lime: read("lime"),
         veil: read("veil"),
+        win: read("win"),
         slices: Array.from({ length: 8 }, (_, i) => read(`slice-${i + 1}`)),
     };
 }
@@ -293,9 +295,10 @@ function drawLabels(angle: number, seg: number, f: Frame): void {
             return;
         }
         const half = n === 1 ? Math.PI / 2 : (seg * Math.PI) / 360;
-        const at = n === 1 ? 0 : r * 0.55;
+        const at = n === 1 ? 0 : r * (n <= 4 ? 0.5 : 0.55);
+        // Wide slices get bigger pictures, but never into the label on the rim.
         const size = Math.min(
-            n <= 4 ? 36 : 30,
+            n <= 4 ? 34 : 30,
             Math.max(14, at * Math.sin(half) * 0.82)
         );
         const a = rad(centre);
@@ -351,6 +354,9 @@ function drawWheel(f: Frame): void {
             slicePath(i, angle, seg, r + 0.5);
             ctx.fill();
         }
+        slicePath(plan.winner, angle, seg);
+        ctx.fillStyle = palette.win;
+        ctx.fill();
         ctx.globalAlpha = 1;
     }
 

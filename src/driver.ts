@@ -745,7 +745,7 @@ export function createSpin(overrides: Partial<Env> = {}): DriverModule {
                 syncPanel(s, true);
                 return;
             case "new":
-                return enqueue(() => addWheel(s));
+                return enqueue(() => addWheel(s, newWheel("", [])));
             case "duplicate":
                 if (ref) return enqueue(() => duplicate(s, ref));
                 return;

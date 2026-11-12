@@ -264,7 +264,7 @@ test("Duplicate adds a second wheel beside the first with the same entries, its 
     assert.equal(lastState(host)?.count, 2);
 });
 
-test("New wheel adds another, and the panel follows the selected wheel", async () => {
+test("the panel follows the selected wheel", async () => {
     const { host, settle } = await withWheel();
     const first = onlyWidget(host);
     host.message({ type: "new" });
@@ -313,4 +313,15 @@ test("a board without the scene permission gets a notice instead of a wheel", as
     assert.equal(wheels(host).length, 0);
     assert.deepEqual(errors(host), ["denied"]);
     assert.equal(lastState(host)?.wheel, null);
+});
+
+test("New wheel from the panel starts empty, ready for names, while the first wheel shows lunch ideas", async () => {
+    const { host, settle } = await withWheel();
+    host.message({ type: "new" });
+    await settle();
+    const fresh = wheels(host).find(
+        (w) => w.id === lastState(host)?.wheel?.el
+    )!;
+    assert.deepEqual(wheelOf(fresh).entries, []);
+    assert.equal(wheels(host).length, 2);
 });

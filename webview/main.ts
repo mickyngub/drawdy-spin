@@ -105,6 +105,7 @@ let sound = false;
 let ready = false;
 let pickerFor: string | null = null;
 let photoFor: string | null = null;
+let focusAdd = false;
 let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 let landTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -306,6 +307,7 @@ function handle(message: DriverToWebview): void {
             ready = true;
             sound = message.sound;
             const incoming = message.wheel;
+            const previous = wheel?.wheelId;
             const keepLocal =
                 incoming &&
                 wheel &&
@@ -320,9 +322,13 @@ function handle(message: DriverToWebview): void {
                       }
                     : incoming
                 : null;
-            if (!keepLocal && incoming?.wheelId !== wheel?.wheelId)
-                pickerFor = null;
+            const switched = incoming?.wheelId !== previous;
+            if (switched) pickerFor = null;
             render();
+            if (switched && focusAdd && incoming) {
+                focusAdd = false;
+                addInput.focus();
+            }
             return;
         }
         case "spun":
@@ -470,9 +476,10 @@ resetButton.addEventListener("click", () => {
 });
 
 for (const id of ["new", "new-empty"])
-    $<HTMLButtonElement>(id).addEventListener("click", () =>
-        send({ type: "new" })
-    );
+    $<HTMLButtonElement>(id).addEventListener("click", () => {
+        focusAdd = true;
+        send({ type: "new" });
+    });
 
 $<HTMLButtonElement>("duplicate").addEventListener("click", () => {
     if (wheel)
