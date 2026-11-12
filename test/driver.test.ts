@@ -1,431 +1,316 @@
 import assert from "node:assert/strict";
-import { test, type TestContext } from "node:test";
-import { SPIN_MS, planFor } from "../src/lib/animation-plan";
-import { DEFAULT_OPTIONS, computeResult } from "../src/lib/modes";
-import { FADE_MS, HOLD_MS } from "../src/lib/reveal";
-import { createSpin } from "../src/driver";
-import { overlaps } from "../src/lib/free-spot";
-import { DEFAULT_SETTINGS } from "../src/shared/messages";
-import { boot, fakeHost, overlayConfig, type FakeHost } from "./fake-host";
+import { test } from "node:test";
+import { EDIT_DELAY_MS } from "../src/driver";
+import { PROMPTS } from "../src/lib/prompts";
+import { SPIN_LEAD_MS, SPIN_MS } from "../src/lib/wheel";
+import {
+    buttonIdsOf,
+    DRIVER_ID,
+    errors,
+    lastState,
+    onlyWheel,
+    onlyWidget,
+    openPanel,
+    press,
+    rectOf,
+    sentOf,
+    solo,
+    START,
+    wheelOf,
+    wheels,
+    writes,
+} from "./helpers";
 
-const START = 1_800_000_000_000;
-const KEY = "mickyngub.spin";
-const settle = async (host: FakeHost) => {
-    await host.board.flush();
-    await new Promise((r) => setImmediate(r));
-};
+const LANDS = SPIN_LEAD_MS + SPIN_MS;
 
-function clock(t: TestContext) {
-    t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: START });
-    return (ms: number) => t.mock.timers.tick(ms);
+async function withWheel(options: Parameters<typeof solo>[0] = {}) {
+    const t = await solo(options);
+    await openPanel(t.host, t.settle);
+    return t;
 }
 
-const request = (patch: Record<string, unknown> = {}) => ({
-    mode: "wheel",
-    source: "list",
-    entries: ["Mali", "Ben", "Sara", "Joe"],
-    stickyIds: [],
-    options: DEFAULT_OPTIONS,
-    ...patch,
+const panelEl = (host: Parameters<typeof lastState>[0]) =>
+    lastState(host)?.wheel?.el ?? "";
+
+test("opening the panel on an empty view adds one 440 x 520 wheel of lunch ideas, selected, and the panel edits it", async () => {
+    const { host } = await withWheel();
+    const el = onlyWidget(host);
+    assert.equal(el.type, "component");
+    assert.deepEqual([el.width, el.height], [440, 520]);
+    const wheel = wheelOf(el);
+    assert.equal(wheel.entries.length, 8);
+    assert.ok(wheel.entries.every((e) => e.emoji));
+    assert.equal(wheel.removePicked, true);
+    assert.equal(panelEl(host), el.id);
+    const selected = sentOf(host, "command:scene:set-selection").at(-1);
+    assert.deepEqual(selected?.req.drawdyElementIds, [el.id]);
 });
 
-test("activation adds the rail button and watches for cards without asking for people, storage or the selection", async () => {
-    const host = fakeHost();
-    await boot(createSpin(), host);
-    const types = host.types();
-    assert.ok(types.includes("command:dom:create-action-button"));
-    const added = host.sentOf("subscription:scene:elements-added")[0];
-    assert.deepEqual(added.req.properties, ["meta", "opacity"]);
-    assert.ok(types.includes("subscription:scene:elements-replaced"));
-    for (const prefix of [
-        "command:collaboration",
-        "subscription:collaboration",
-        "command:kv-storage",
-        "subscription:scene:drawdy-element-selection",
-    ])
-        assert.ok(!types.some((t) => t.startsWith(prefix)), prefix);
-});
-
-test("the rail button opens a themed panel that is destroyed when closed", async () => {
-    const host = fakeHost();
-    const { click } = await boot(createSpin(), host, {
-        theme: "light",
-        tokens: { "--dd-surface-panel": "#fff" },
-    });
-    await click();
-    const [created] = host.sentOf("command:webview:create");
-    assert.equal(created.req.keepStateWhenClosed, false);
-    assert.ok(!created.req.htmlContent.includes("/*__DRAWDY_STYLING__*/"));
-    assert.ok(created.req.htmlContent.includes("--dd-surface-panel: #fff;"));
-});
-
-test("the panel gets the saved settings, cleaned, and saves changes back", async () => {
-    const empty = fakeHost();
-    await (await boot(createSpin(), empty)).open();
-    assert.deepEqual(empty.postedOf("init")[0], {
-        type: "init",
-        settings: null,
-    });
-
-    const host = fakeHost({
-        kv: { settings: { mode: "coin", list: "A\nB", bogus: 1 } },
-    });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    const init = host.postedOf("init")[0];
-    assert.equal(init.settings.mode, "coin");
-    assert.equal(init.settings.list, "A\nB");
-    assert.ok(!("bogus" in init.settings));
-
-    await message({
-        type: "save",
-        settings: { ...DEFAULT_SETTINGS, mode: "dice", sound: true },
-    });
-    assert.equal((host.kv.get("settings") as any).mode, "dice");
-    assert.equal((host.kv.get("settings") as any).sound, true);
-});
-
-test("people come from presence when asked, sorted with repeated names numbered, and update when someone joins", async () => {
-    const host = fakeHost({
-        users: [{ name: "Sara" }, { name: "ben" }, { name: "Sara" }],
-    });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({ type: "people" });
-    assert.deepEqual(host.postedOf("people")[0], {
-        type: "people",
-        status: "ok",
-        names: ["ben", "Sara", "Sara (2)"],
-    });
-    assert.equal(
-        host.sentOf("subscription:collaboration:presence-changed").length,
-        1
+test("pressing the hub replaces the wheel in place with a spin that starts 400 ms later and lands on a remaining entry", async () => {
+    const { host, settle } = await withWheel({ pick: () => 2 });
+    const before = onlyWidget(host);
+    host.clear();
+    await press(host, settle, before, "spin");
+    const after = onlyWidget(host);
+    assert.notEqual(after.id, before.id);
+    assert.deepEqual(rectOf(after), rectOf(before));
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    const wheel = wheelOf(after);
+    assert.equal(wheel.wheelId, wheelOf(before).wheelId);
+    assert.equal(wheel.lastSpin?.startedAt, START + SPIN_LEAD_MS);
+    assert.equal(wheel.lastSpin?.result, wheel.entries[2].id);
+    assert.deepEqual(wheel.picked, [wheel.entries[2].id]);
+    assert.ok(
+        buttonIdsOf(after).includes(`${DRIVER_ID}:${wheel.wheelId}:reset`)
     );
-    const user = (name: string) => ({
-        id: name,
-        name,
-        color: "#000",
-        isHost: false,
-        isSelf: false,
-        cursorPosition: { x: 1, y: 2 },
-    });
-    host.event("subscription:collaboration:presence-changed", {
-        users: [user("Sara"), user("ben"), user("Sara")],
-    });
-    await settle(host);
-    assert.equal(
-        host.postedOf("people").length,
-        1,
-        "a cursor move changes nothing"
-    );
-    host.event("subscription:collaboration:presence-changed", {
-        users: [user("Sara"), user("ben"), user("Sara"), user("Kai")],
-    });
-    await settle(host);
-    assert.deepEqual(host.postedOf("people")[1].names, [
-        "ben",
-        "Kai",
-        "Sara",
-        "Sara (2)",
-    ]);
 });
 
-test("people show as blocked when the collaboration permission is denied", async () => {
-    const host = fakeHost({ denied: ["command:collaboration"] });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({ type: "people" });
-    assert.deepEqual(host.postedOf("people")[0], {
-        type: "people",
-        status: "blocked",
-        names: [],
-    });
+test("a press that drags the wheel by its hub is not a spin", async () => {
+    const { host, settle } = await withWheel();
+    host.clear();
+    await press(host, settle, onlyWidget(host), "spin", 12);
+    assert.deepEqual(writes(host), []);
+    assert.equal(onlyWheel(host).lastSpin, undefined);
 });
 
-test("the selected stickies are sent with their first lines, in selection order, leaving out other elements", async () => {
-    const host = fakeHost({ selection: ["s2", "shape", "s1", "blank"] });
-    const sticky = (id: string, text: string) => ({
-        drawdyElementId: id,
-        type: "shape",
-        componentType: "sticky-note",
-        x: 0,
-        y: 0,
-        text,
-    });
-    host.board.elements.set("s1", sticky("s1", "Pricing page\ndetails"));
-    host.board.elements.set("s2", sticky("s2", "\nOnboarding"));
-    host.board.elements.set("blank", sticky("blank", "  "));
-    host.board.elements.set("shape", {
-        drawdyElementId: "shape",
-        type: "shape",
-        componentType: "rect",
-        x: 0,
-        y: 0,
-        text: "A box",
-    });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    assert.equal(
-        host.sentOf("subscription:scene:drawdy-element-selection").length,
-        0,
-        "only once the stickies source is used"
-    );
-    await message({ type: "stickies" });
-    assert.deepEqual(host.postedOf("stickies")[0].items, [
-        { id: "s2", label: "Onboarding" },
-        { id: "s1", label: "Pricing page" },
-    ]);
-    host.event("subscription:scene:drawdy-element-selection", {
-        drawdyElementIds: ["s1"],
-    });
-    await settle(host);
-    assert.deepEqual(host.postedOf("stickies")[1].items, [
-        { id: "s1", label: "Pricing page" },
-    ]);
+test("presses during a spin are ignored, and the next spin skips who was picked", async () => {
+    const { host, settle, advance } = await withWheel();
+    await press(host, settle, onlyWidget(host), "spin");
+    const first = onlyWheel(host).lastSpin!.result;
+    host.clear();
+    await advance(1000);
+    await press(host, settle, onlyWidget(host), "spin");
+    await press(host, settle, onlyWidget(host), "reset");
+    assert.deepEqual(writes(host), []);
+    await advance(LANDS);
+    await press(host, settle, onlyWidget(host), "spin");
+    const wheel = onlyWheel(host);
+    assert.notEqual(wheel.lastSpin!.result, first);
+    assert.deepEqual(wheel.picked, [first, wheel.lastSpin!.result]);
 });
 
-test("a wheel spin adds one hidden sticky-note card centred left of the panel and plays a click-through overlay", async (t) => {
-    const tick = clock(t);
-    const viewport = { x: 100, y: -200, width: 1600, height: 1000 };
-    const host = fakeHost({ viewport });
-    const { open, message } = await boot(
-        createSpin({ seed: () => 777, jitter: () => 0 }),
-        host
-    );
-    await open();
-    await message({ type: "spin", request: request() });
+test("Reset on the board brings everyone back, and when no one is left the hub resets too", async () => {
+    const { host, settle, advance } = await withWheel();
+    const el = onlyWidget(host);
+    host.message({
+        type: "edit",
+        el: el.id,
+        entries: [
+            { id: "a", text: "Mali" },
+            { id: "b", text: "Ben" },
+        ],
+        removePicked: true,
+    });
+    await settle();
+    await advance(EDIT_DELAY_MS + 50);
+    assert.deepEqual(buttonIdsOf(onlyWidget(host)).length, 1);
+    for (let i = 0; i < 2; i++) {
+        await press(host, settle, onlyWidget(host), "spin");
+        await advance(LANDS);
+    }
+    assert.deepEqual(onlyWheel(host).picked, ["a", "b"]);
+    await press(host, settle, onlyWidget(host), "spin");
+    assert.deepEqual(onlyWheel(host).picked, []);
+    assert.equal(onlyWheel(host).lastSpin, undefined);
 
-    const adds = host.sentOf("command:scene:add-drawdy-elements");
-    assert.equal(adds.length, 1);
-    const [card] = adds[0].req.elements;
-    assert.equal(card.type, "shape");
-    assert.equal(card.componentType, "sticky-note");
-    assert.equal(card.opacity, 0);
-    const spin = card.meta[KEY];
-    assert.equal(spin.v, 1);
-    assert.equal(spin.seed, 777);
-    assert.equal(spin.startedAt, START);
-    assert.equal(spin.mode, "wheel");
-    assert.equal(spin.source, "list");
-    assert.deepEqual(spin.entries, ["Mali", "Ben", "Sara", "Joe"]);
+    await press(host, settle, onlyWidget(host), "spin");
+    await advance(LANDS);
+    await press(host, settle, onlyWidget(host), "reset");
+    assert.deepEqual(onlyWheel(host).picked, []);
+    assert.equal(onlyWheel(host).lastSpin, undefined);
+    assert.deepEqual(buttonIdsOf(onlyWidget(host)).length, 1);
+});
+
+test("panel edits wait 600 ms after the last keystroke, then replace the wheel once", async () => {
+    const { host, settle, advance } = await withWheel();
+    const el = onlyWidget(host);
+    host.clear();
+    for (const text of ["M", "Ma", "Mal", "Mali"]) {
+        host.message({
+            type: "edit",
+            el: el.id,
+            entries: [
+                { id: "a", text },
+                { id: "b", text: "Ben" },
+            ],
+            removePicked: true,
+        });
+        await settle();
+        await advance(200);
+    }
+    assert.deepEqual(writes(host), []);
+    assert.equal(lastState(host)?.wheel?.entries[0].text, "Mali");
+    await advance(EDIT_DELAY_MS);
+    assert.deepEqual(writes(host), ["add", "remove"]);
     assert.deepEqual(
-        spin.result,
-        computeResult("wheel", 777, 4, DEFAULT_OPTIONS)
+        onlyWheel(host).entries.map((e) => e.text),
+        ["Mali", "Ben"]
     );
-    const drawerLeft = viewport.x + viewport.width - 336 - 16;
-    assert.ok(
-        Math.abs(card.x + card.width / 2 - (viewport.x + drawerLeft) / 2) <= 1
-    );
-    assert.ok(
-        Math.abs(
-            card.y + card.height / 2 - (viewport.y + viewport.height / 2)
-        ) <= 1
-    );
+});
 
-    const spun = host.postedOf("spun")[0];
-    assert.equal(spun.cardId, card.drawdyElementId);
-    assert.deepEqual(spun.plan, planFor(spin));
-
-    const overlays = host.overlays();
-    assert.equal(overlays.length, 1);
-    const [overlay] = overlays;
-    assert.equal(overlay.asPopover, false);
-    assert.equal(overlay.schema.type, "iframe");
-    assert.equal(overlay.schema.styles.pointerEvents, "none");
-    const config = overlayConfig(overlay);
-    assert.deepEqual(config.plan, planFor(spin));
-    assert.equal(config.localStart, START);
-    assert.equal(config.theme, "dark");
-    assert.ok(
-        overlay.position.x + overlay.schema.styles.width[0] <
-            viewport.width - 336,
-        "the overlay stays left of the panel"
-    );
-
-    tick(SPIN_MS + HOLD_MS - 1);
-    await settle(host);
-    assert.equal(host.board.elements.get(card.drawdyElementId)?.opacity, 0);
-    tick(1);
-    await settle(host);
-    assert.equal(host.board.elements.get(card.drawdyElementId)?.opacity, 1);
+test("an edit sent while the wheel turns waits until it lands, so no one sees a spin change course", async () => {
+    const { host, settle, advance } = await withWheel();
+    await press(host, settle, onlyWidget(host), "spin");
+    const spinning = onlyWidget(host);
+    host.clear();
+    host.message({
+        type: "edit",
+        el: spinning.id,
+        entries: wheelOf(spinning).entries.slice(0, 5),
+        removePicked: true,
+    });
+    await settle();
+    await advance(EDIT_DELAY_MS + 100);
+    assert.deepEqual(writes(host), []);
+    await advance(LANDS);
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    assert.equal(onlyWheel(host).entries.length, 5);
     assert.equal(
-        host.sentOf("command:scene:update-drawdy-elements").length,
-        1,
-        "one update reveals it"
-    );
-    assert.deepEqual(host.postedOf("landed"), [
-        { type: "landed", cardId: card.drawdyElementId },
-    ]);
-    assert.equal(host.sentOf("command:scene:set-selection").length, 0);
-
-    tick(FADE_MS + 200);
-    await settle(host);
-    assert.equal(host.overlays().length, 0);
-});
-
-test("the spinner's own echo of the card does not start a second overlay", async (t) => {
-    clock(t);
-    const host = fakeHost();
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({ type: "spin", request: request() });
-    await settle(host);
-    assert.equal(host.sentOf("command:dom:create-floating-element").length, 1);
-});
-
-async function stickySpin(t: TestContext, x: number) {
-    const tick = clock(t);
-    const host = fakeHost();
-    for (const id of ["a", "b", "c"])
-        host.board.elements.set(id, {
-            drawdyElementId: id,
-            type: "shape",
-            componentType: "sticky-note",
-            x,
-            y: 100,
-            width: 200,
-            height: 193,
-            text: `Topic ${id}`,
-        });
-    const { open, message } = await boot(createSpin({ seed: () => 31 }), host);
-    await open();
-    await message({
-        type: "spin",
-        request: request({
-            source: "stickies",
-            entries: ["Topic a", "Topic b", "Topic c"],
-            stickyIds: ["a", "b", "c"],
-        }),
-    });
-    const { index } = computeResult("wheel", 31, 3, DEFAULT_OPTIONS) as {
-        index: number;
-    };
-    assert.equal(host.sentOf("command:scene:set-selection").length, 0);
-    tick(SPIN_MS + HOLD_MS);
-    await settle(host);
-    return { host, winner: ["a", "b", "c"][index] };
-}
-
-test("a wheel over stickies selects the winning sticky after the reveal and flies to it when it is out of view", async (t) => {
-    const { host, winner } = await stickySpin(t, 5000);
-    assert.deepEqual(host.selection, [winner]);
-    const [fly] = host.sentOf("command:camera:fly-to-rect");
-    assert.equal(fly.req.rect.x, 5000);
-    assert.ok(
-        fly.req.rect.width > 200,
-        "widened so the panel does not cover it"
+        onlyWheel(host).lastSpin?.result,
+        wheelOf(spinning).lastSpin?.result
     );
 });
 
-test("a winning sticky already in view is selected without moving the camera", async (t) => {
-    const { host, winner } = await stickySpin(t, 300);
-    assert.deepEqual(host.selection, [winner]);
-    assert.equal(host.sentOf("command:camera:fly-to-rect").length, 0);
-});
-
-test("dice, coin and warm-up need no entries and record no source", async (t) => {
-    clock(t);
-    for (const [mode, options] of [
-        ["dice", { ...DEFAULT_OPTIONS, diceCount: 3, diceSides: 20 }],
-        ["coin", DEFAULT_OPTIONS],
-        ["warmup", { ...DEFAULT_OPTIONS, lang: "th" }],
-    ] as const) {
-        const host = fakeHost();
-        const { open, message } = await boot(createSpin(), host);
-        await open();
-        await message({
-            type: "spin",
-            request: request({ mode, entries: [], options }),
-        });
-        const [card] = host.sentOf("command:scene:add-drawdy-elements")[0].req
-            .elements;
-        assert.equal(card.meta[KEY].mode, mode);
-        assert.equal(card.meta[KEY].source, null);
-        assert.deepEqual(card.meta[KEY].entries, []);
-        if (mode === "warmup")
-            assert.deepEqual(host.postedOf("spun")[0].prompt, {
-                lang: "th",
-                index: card.meta[KEY].result.prompt,
-            });
-    }
-});
-
-test("a spin with fewer than 2 entries is refused without touching the board", async () => {
-    const host = fakeHost();
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({
-        type: "spin",
-        request: request({ entries: ["Mali", "   "] }),
+test("Spin from the panel takes a waiting edit with it in the same replacement", async () => {
+    const { host, settle } = await withWheel();
+    const el = onlyWidget(host);
+    host.clear();
+    host.message({
+        type: "edit",
+        el: el.id,
+        entries: [
+            { id: "x", text: "Only" },
+            { id: "y", text: "Two" },
+        ],
+        removePicked: false,
     });
-    assert.equal(host.sentOf("command:scene:add-drawdy-elements").length, 0);
-    assert.deepEqual(host.postedOf("error"), [
-        { type: "error", reason: "too-few" },
-    ]);
+    host.message({ type: "spin", el: el.id });
+    await settle();
+    assert.deepEqual(writes(host), ["add", "remove"]);
+    const wheel = onlyWheel(host);
+    assert.deepEqual(
+        wheel.entries.map((e) => e.id),
+        ["x", "y"]
+    );
+    assert.equal(wheel.removePicked, false);
+    assert.deepEqual(wheel.picked, []);
+    assert.equal(wheel.lastSpin?.result, "x");
 });
 
-test("a board that refuses the card reports it as blocked and frees the Spin button", async () => {
-    const host = fakeHost({ addError: "unauthorized" });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({ type: "spin", request: request() });
-    assert.deepEqual(host.postedOf("error"), [
-        { type: "error", reason: "blocked" },
-    ]);
-    assert.equal(host.overlays().length, 0);
-});
-
-test("a second spin while one is running is ignored", async (t) => {
-    clock(t);
-    const host = fakeHost();
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    await message({ type: "spin", request: request() });
-    await message({ type: "spin", request: request() });
-    assert.equal(host.sentOf("command:scene:add-drawdy-elements").length, 1);
-});
-
-test("six spins in a row each land in view, clear of the panel, the host bars and each other", async (t) => {
-    const tick = clock(t);
-    const viewport = { x: 0, y: 0, width: 1600, height: 1000 };
-    const host = fakeHost({ viewport });
-    host.board.elements.set("note", {
-        drawdyElementId: "note",
-        type: "shape",
-        componentType: "sticky-note",
-        x: 520,
-        y: 380,
-        width: 300,
-        height: 240,
+test("People here fills the wheel with who has the board open, and says so when you are alone", async () => {
+    const { host, settle } = await withWheel({
+        users: [{ name: "Sara" }, { name: "Ben" }, { name: "Mali" }],
     });
-    const { open, message } = await boot(createSpin(), host);
-    await open();
-    for (const mode of ["wheel", "order", "groups", "dice", "coin", "warmup"]) {
-        await message({ type: "spin", request: request({ mode }) });
-        tick(SPIN_MS + HOLD_MS + FADE_MS);
-        await settle(host);
-    }
-    const placed = host
-        .sentOf("command:scene:add-drawdy-elements")
-        .map((s) => s.req.elements[0]);
-    assert.equal(placed.length, 6);
-    const panelLeft = viewport.width - 336 - 16;
-    const rects = [host.board.elements.get("note"), ...placed].map((el) => ({
-        x: el!.x,
-        y: el!.y,
-        width: el!.width,
-        height: el!.height,
-    }));
-    for (const card of rects.slice(1)) {
-        assert.ok(card.x >= viewport.x);
-        assert.ok(card.y >= viewport.y + 64, "below the top bar");
-        assert.ok(card.x + card.width <= panelLeft, "clear of the panel");
-        assert.ok(
-            card.y + card.height <= viewport.y + viewport.height - 64,
-            "above the bottom bar"
-        );
-    }
-    for (let i = 0; i < rects.length; i++)
-        for (let j = i + 1; j < rects.length; j++)
-            assert.ok(!overlaps(rects[i], rects[j]), `${i} and ${j} overlap`);
+    host.message({ type: "preset", el: onlyWidget(host).id, preset: "people" });
+    await settle();
+    assert.deepEqual(
+        onlyWheel(host).entries.map((e) => e.text),
+        ["Ben", "Mali", "Sara"]
+    );
+
+    const alone = await withWheel({ users: [{ name: "Me" }] });
+    const before = onlyWheel(alone.host);
+    alone.host.message({
+        type: "preset",
+        el: onlyWidget(alone.host).id,
+        preset: "people",
+    });
+    await alone.settle();
+    assert.deepEqual(errors(alone.host), ["alone"]);
+    assert.deepEqual(onlyWheel(alone.host), before);
+
+    const blocked = await withWheel({ denied: ["command:collaboration"] });
+    blocked.host.message({
+        type: "preset",
+        el: onlyWidget(blocked.host).id,
+        preset: "people",
+    });
+    await blocked.settle();
+    assert.deepEqual(errors(blocked.host), ["people-blocked"]);
+});
+
+test("a preset replaces the entries at once and clears the picks", async () => {
+    const { host, settle, advance } = await withWheel();
+    await press(host, settle, onlyWidget(host), "spin");
+    await advance(LANDS);
+    host.message({
+        type: "preset",
+        el: onlyWidget(host).id,
+        preset: "warmup-th",
+    });
+    await settle();
+    const wheel = onlyWheel(host);
+    assert.equal(wheel.entries.length, 8);
+    assert.ok(wheel.entries.every((e) => PROMPTS.th.includes(e.text)));
+    assert.deepEqual(wheel.picked, []);
+    assert.equal(wheel.lastSpin, undefined);
+});
+
+test("Duplicate adds a second wheel beside the first with the same entries, its own id and no picks", async () => {
+    const { host, settle, advance } = await withWheel();
+    await press(host, settle, onlyWidget(host), "spin");
+    await advance(LANDS);
+    const original = onlyWidget(host);
+    host.message({ type: "duplicate", el: original.id });
+    await settle();
+    const all = wheels(host);
+    assert.equal(all.length, 2);
+    const copy = all.find((w) => w.id !== original.id)!;
+    assert.ok((copy.x as number) >= (original.x as number) + 440);
+    assert.deepEqual(wheelOf(copy).entries, wheelOf(original).entries);
+    assert.notEqual(wheelOf(copy).wheelId, wheelOf(original).wheelId);
+    assert.deepEqual(wheelOf(copy).picked, []);
+    assert.equal(lastState(host)?.wheel?.el, copy.id);
+    assert.equal(lastState(host)?.count, 2);
+});
+
+test("New wheel adds another, and the panel follows the selected wheel", async () => {
+    const { host, settle } = await withWheel();
+    const first = onlyWidget(host);
+    host.message({ type: "new" });
+    await settle();
+    assert.equal(wheels(host).length, 2);
+    host.select([first.id]);
+    await settle();
+    assert.equal(lastState(host)?.wheel?.el, first.id);
+});
+
+test("with the tick sound on, the screen that spins gets the ticks, timed to the spin", async () => {
+    const { host, settle } = await withWheel();
+    host.message({ type: "sound", on: true });
+    await settle();
+    assert.deepEqual(host.kv.get("prefs"), { sound: true });
+    await press(host, settle, onlyWidget(host), "spin");
+    const spun = host.posted.filter((m) => m.type === "spun");
+    assert.equal(spun.length, 1);
+    assert.equal(spun[0].startedAt, START + SPIN_LEAD_MS);
+    assert.ok(spun[0].ticks.length > 10);
+
+    const quiet = await withWheel();
+    await press(quiet.host, quiet.settle, onlyWidget(quiet.host), "spin");
+    assert.equal(quiet.host.posted.filter((m) => m.type === "spun").length, 0);
+});
+
+test("a wheel someone resized keeps its size through a spin", async () => {
+    const { host, settle } = await withWheel();
+    const el = onlyWidget(host);
+    host.restore({ ...el, width: 660, height: 780 });
+    await settle();
+    await press(host, settle, onlyWidget(host), "spin");
+    const after = onlyWidget(host);
+    assert.deepEqual([after.width, after.height], [660, 780]);
+    assert.match(
+        String(
+            (after.schema as { styles: { transform?: string } }).styles
+                .transform
+        ),
+        /scale\(1\.5, 1\.5\)/
+    );
+});
+
+test("a board without the scene permission gets a notice instead of a wheel", async () => {
+    const { host } = await withWheel({ denied: ["command:scene:add"] });
+    assert.equal(wheels(host).length, 0);
+    assert.deepEqual(errors(host), ["denied"]);
+    assert.equal(lastState(host)?.wheel, null);
 });

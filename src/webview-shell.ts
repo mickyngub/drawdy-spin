@@ -1,8 +1,10 @@
 import {
+    CHECK_ROW,
     CHECKBOX,
     EMPTY,
+    FOOTER_SECONDARY,
     HINT,
-    ICON_BUTTON,
+    INPUT,
     LABEL_ROW,
     NOTICE,
     OPTION_GRID,
@@ -10,130 +12,78 @@ import {
     PRIMARY,
     SCROLL,
     SECONDARY,
-    SECONDARY_FOOTER,
     SECTION,
-    TEXTAREA,
-    TRACK,
-    TRACK_ITEM,
 } from "../webview/lib/classes";
 import { ICONS, icon } from "../webview/lib/icons";
+import { MAX_TEXT } from "./lib/entries";
 import { PANEL_CSS } from "./panel-css";
 
-const MODE_BUTTONS = (
+const PRESET_BUTTONS = (
     [
-        ["wheel", "Wheel"],
-        ["order", "Order"],
-        ["groups", "Groups"],
-        ["dice", "Dice"],
-        ["coin", "Coin"],
-        ["warmup", "Warm-up"],
+        ["people", ICONS.group, "People here"],
+        ["yes-no", ICONS.thumb, "Yes or no"],
+        ["lunch", ICONS.food, "Lunch ideas"],
+        ["warmup-en", ICONS.talk, "Warm-up"],
+        ["warmup-th", ICONS.talk, "คำถามอุ่นเครื่อง"],
     ] as const
 )
     .map(
-        ([mode, label]) =>
-            `<button type="button" class="${OPTION_ITEM}" data-mode="${mode}" aria-pressed="false">${icon(ICONS[mode], "size-3.5 shrink-0")}<span class="truncate">${label}</span></button>`
+        ([preset, path, label]) =>
+            `<button type="button" class="${OPTION_ITEM}" data-preset="${preset}">${icon(path, "size-3.5 shrink-0")}<span class="truncate">${label}</span></button>`
     )
     .join("");
 
-const track = (
-    id: string,
-    label: string,
-    attr: string,
-    items: readonly (readonly [string, string])[]
-) =>
-    `<div id="${id}" role="group" aria-label="${label}" class="${TRACK}">${items
-        .map(
-            ([value, text]) =>
-                `<button type="button" class="${TRACK_ITEM}" data-${attr}="${value}" aria-pressed="false">${text}</button>`
-        )
-        .join("")}</div>`;
+const check = (id: string, label: string) => `
+<label class="${CHECK_ROW}">
+    <span class="relative grid place-items-center">
+        <input type="checkbox" id="${id}" class="${CHECKBOX}" />
+        ${icon(ICONS.check, "pointer-events-none absolute hidden size-3 text-on-accent peer-checked:block")}
+    </span>
+    ${label}
+</label>`;
 
 const BODY = `
-<main id="panel" class="flex min-h-0 flex-1 flex-col" data-mode="wheel" data-source="people" data-busy="false">
+<main id="panel" class="flex min-h-0 flex-1 flex-col" data-state="loading">
     <div class="${SCROLL}">
-        <section class="${SECTION}">
-            <div class="${LABEL_ROW}"><span id="mode-label">Mode</span></div>
-            <div id="modes" role="group" aria-labelledby="mode-label" class="${OPTION_GRID}">${MODE_BUTTONS}</div>
-            <p id="mode-hint" class="${HINT}"></p>
-        </section>
-        <section id="groups-section" class="${SECTION}" hidden>
-            <div class="${LABEL_ROW}"><span>Split</span><span id="groups-preview" class="truncate text-fg-subtle"></span></div>
-            ${track("groups-by", "Split by", "groups-by", [
-                ["count", "Number of groups"],
-                ["size", "Group size"],
-            ])}
-            <div class="flex items-center gap-1">
-                <button type="button" id="groups-minus" class="${ICON_BUTTON}" aria-label="Fewer">${icon(ICONS.minus)}</button>
-                <output id="groups-n" class="min-w-8 text-center text-label-md text-fg tabular-nums" aria-live="polite"></output>
-                <button type="button" id="groups-plus" class="${ICON_BUTTON}" aria-label="More">${icon(ICONS.plus)}</button>
-                <span id="groups-unit" class="ml-1 ${HINT}"></span>
-            </div>
-        </section>
-        <section id="dice-section" class="${SECTION}" hidden>
-            <div class="${LABEL_ROW}"><span>Dice</span></div>
-            ${track("dice-count", "How many dice", "dice-count", [
-                ["1", "1 die"],
-                ["2", "2 dice"],
-                ["3", "3 dice"],
-            ])}
-            ${track("dice-sides", "Sides", "dice-sides", [
-                ["6", "6 sides"],
-                ["20", "20 sides"],
-            ])}
-        </section>
-        <section id="warmup-section" class="${SECTION}" hidden>
-            <div class="${LABEL_ROW}"><span>Language</span></div>
-            ${track("langs", "Language", "lang", [
-                ["en", "English"],
-                ["th", "ไทย"],
-            ])}
-        </section>
-        <section id="source-section" class="${SECTION}">
-            <div class="${LABEL_ROW}"><span>Pick from</span><span id="entry-count" class="text-fg-subtle tabular-nums" data-count="0"></span></div>
-            ${track("sources", "Pick from", "source", [
-                ["people", "People here"],
-                ["stickies", "Stickies"],
-                ["list", "List"],
-            ])}
-            <div data-pane="people" class="flex flex-col gap-2">
-                <div id="people" class="flex flex-wrap gap-1.5 empty:hidden"></div>
-                <div id="people-alone" class="${EMPTY}" hidden>
-                    ${icon(ICONS.user, "size-5 text-fg-subtle")}
-                    <span class="text-label text-fg">Only you are here</span>
-                    <span class="${HINT}">The wheel needs at least 2 people on the board. You can type names instead.</span>
-                    <button type="button" id="type-names" class="${SECONDARY} mt-2">Type names</button>
+        <div id="empty" class="${EMPTY}" hidden>
+            ${icon(ICONS.wheel, "size-5 text-fg-subtle")}
+            <span class="text-label text-fg">No wheel here yet</span>
+            <span class="${HINT}">Add one to the board, then fill it with names or ideas.</span>
+            <button type="button" id="new-empty" class="${SECONDARY} mt-2 flex-none">${icon(ICONS.add)}<span>New wheel</span></button>
+        </div>
+        <div id="editor" class="flex flex-col gap-4" hidden>
+            <section class="${SECTION}">
+                <div class="${LABEL_ROW}">
+                    <span id="entries-label">Names or options</span>
+                    <span id="count" class="text-fg-subtle tabular-nums" data-count="0"></span>
                 </div>
-                <p id="people-blocked" class="${NOTICE}" hidden>Spin can't see who's on the board. Allow it under Manage permissions, or type the names in a list.</p>
-            </div>
-            <div data-pane="stickies" class="flex flex-col gap-2" hidden>
-                <div id="stickies" class="flex flex-wrap gap-1.5 empty:hidden"></div>
-                <div id="stickies-empty" class="${EMPTY}">
-                    ${icon(ICONS.sticky, "size-5 text-fg-subtle")}
-                    <span class="text-label text-fg">Select 2 or more stickies</span>
-                    <span class="${HINT}">Spin uses the first line of each one.</span>
-                </div>
-                <p id="stickies-hint" class="${HINT}" hidden>Select 2 or more other stickies to change the list.</p>
-            </div>
-            <div data-pane="list" class="flex flex-col gap-2" hidden>
-                <textarea id="list" class="${TEXTAREA}" rows="6" spellcheck="false" placeholder="Mali&#10;Ben&#10;Sara" aria-label="Names or options, one per line"></textarea>
-                <p class="${HINT}">One per line. Spin keeps the list for next time.</p>
-            </div>
-        </section>
-        <label class="inline-flex cursor-pointer items-center gap-2 text-label text-fg-muted">
-            <span class="relative grid place-items-center">
-                <input type="checkbox" id="sound" class="${CHECKBOX}" />
-                ${icon(ICONS.check, "pointer-events-none absolute hidden size-3 text-on-accent peer-checked:block")}
-            </span>
-            Tick sound, only you hear it
-        </label>
+                <input id="add" type="text" class="${INPUT}" maxlength="${MAX_TEXT}" placeholder="Add a name or option" aria-label="Add a name or option" enterkeyhint="done" autocomplete="off" spellcheck="false" />
+                <p id="add-hint" class="${HINT}">Press Enter to add. Paste a list to add each line.</p>
+                <ul id="entries" role="list" aria-labelledby="entries-label" class="flex flex-col gap-0.5 empty:hidden"></ul>
+            </section>
+            <section class="${SECTION}">
+                <div class="${LABEL_ROW}"><span id="presets-label">Start from</span></div>
+                <div id="presets" role="group" aria-labelledby="presets-label" class="${OPTION_GRID}">${PRESET_BUTTONS}</div>
+                <p id="notice" role="alert" class="${NOTICE}" hidden></p>
+            </section>
+            <section class="flex flex-col gap-2.5">
+                ${check("remove-picked", "Remove picked names")}
+                ${check("sound", "Tick sound, only you hear it")}
+            </section>
+            <section class="flex gap-2">
+                <button type="button" id="new" class="${SECONDARY}">${icon(ICONS.add)}<span>New wheel</span></button>
+                <button type="button" id="duplicate" class="${SECONDARY}">${icon(ICONS.copy)}<span>Duplicate</span></button>
+            </section>
+        </div>
     </div>
     <footer class="flex shrink-0 flex-col gap-2 border-t border-divider px-4 py-3">
         <p id="status" role="status" class="truncate text-body text-fg-subtle empty:hidden"></p>
         <div class="flex items-center gap-2">
-            <button type="button" id="remove-winner" class="${SECONDARY_FOOTER}" hidden>${icon(ICONS.remove)}<span>Remove winner</span></button>
-            <button type="button" id="spin" class="${PRIMARY}">${icon(ICONS.spin)}<span>Spin</span></button>
+            <button type="button" id="reset" class="${FOOTER_SECONDARY}">${icon(ICONS.reset)}<span>Reset</span></button>
+            <button type="button" id="spin" class="${PRIMARY}">${icon(ICONS.wheel)}<span>Spin</span></button>
         </div>
     </footer>
+    <input type="file" id="photo-input" accept="image/*" hidden />
 </main>
 `;
 

@@ -31,17 +31,24 @@ export const intBelow = (rng: Rng, n: number): number =>
 export const between = (rng: Rng, min: number, max: number): number =>
     min + rng() * (max - min);
 
-export function shuffled<T>(rng: Rng, items: readonly T[]): T[] {
-    const out = [...items];
-    for (let i = out.length - 1; i > 0; i--) {
-        const j = intBelow(rng, i + 1);
-        [out[i], out[j]] = [out[j], out[i]];
-    }
-    return out;
-}
-
-export function randomSeed(): number {
+function randomUint32(): number {
     const value = new Uint32Array(1);
     globalThis.crypto.getRandomValues(value);
     return value[0];
+}
+
+export const randomSeed = (): number => randomUint32();
+
+/** An index below `n` from crypto randomness, without modulo bias. */
+export function randomBelow(n: number): number {
+    if (n <= 1) return 0;
+    const limit = Math.floor(0x1_0000_0000 / n) * n;
+    for (;;) {
+        const value = randomUint32();
+        if (value < limit) return value % n;
+    }
+}
+
+export function randomId(): string {
+    return randomUint32().toString(36).padStart(7, "0");
 }

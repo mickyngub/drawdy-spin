@@ -1,713 +1,931 @@
 import type {
-    CollaborationUserPresence,
     DriverCommandIssuer,
-    DriverCommandRequest,
-    DriverCommandResponseFor,
-    DriverManifest,
     DriverModule,
+    DriverSubscriptionEvent,
     ModuleStyling,
+    SubscribeableKey,
     SubscribedDrawdyElement,
 } from "@drawdy/driver-protocol";
 import { ACTION_BUTTON_SVG } from "./action-button";
-import { planFor } from "./lib/animation-plan";
-import { cardLayout, resultLabel } from "./lib/card";
-import { findCardSpot } from "./lib/card-spot";
-import { centredIn, contains, visibleArea, type Rect } from "./lib/free-spot";
+import { normalizeEntries, type Entry } from "./lib/entries";
 import {
-    MAX_ENTRIES,
-    MIN_ENTRIES,
-    MODES,
-    SOURCES,
-    cleanLabel,
-    computeResult,
-    distinctNames,
-    firstLine,
-    normalizeOptions,
-    usesEntries,
-} from "./lib/modes";
+    centredIn,
+    findFreeRect,
+    overlaps,
+    PLACE_GAP,
+    revealAndSelect,
+    visibleArea,
+    type Rect,
+} from "./lib/free-spot";
+import { PRESETS, presetEntries, type Preset } from "./lib/presets";
+import { randomBelow, randomId, randomSeed } from "./lib/rng";
+import { planOf, spun, tickTimes } from "./lib/spin-plan";
 import {
-    designSize,
-    overlayDoc,
-    type OverlayColours,
-} from "./lib/overlay-layout";
-import { FADE_MS, FALLBACK_JITTER_MS, HOLD_MS, arrival } from "./lib/reveal";
-import { randomSeed } from "./lib/rng";
-import { readSpin, type SpinMeta } from "./lib/spin-meta";
-import { OVERLAY_HTML } from "./overlay-html";
+    canReset,
+    edited,
+    isSpinning,
+    landsAt,
+    newWheel,
+    readWheel,
+    remaining,
+    reset,
+    sameWheel,
+    type Wheel,
+} from "./lib/wheel";
 import {
-    normalizeSettings,
-    type DriverToWebview,
-    type ErrorReason,
-    type SpinRequest,
-    type StickyItem,
-    type WebviewToDriver,
+    buttonAt,
+    planReplacement,
+    sameRect,
+    WIDGET_SIZE,
+    widgetElement,
+    type Placed,
+} from "./lib/widget";
+import type {
+    DriverToWebview,
+    PanelError,
+    PanelWheel,
+    WebviewToDriver,
 } from "./shared/messages";
 import { WEBVIEW_HTML } from "./webview-html";
 
-const SETTINGS_KEY = "settings";
-const CARD_PROPERTIES = ["meta", "opacity"] as const;
-const DRAWER_GAP_PX = 16;
-const HOST_BAR_PX = 64;
-const FLY_MS = 450;
-/** Frees the Spin button if a reveal never comes back, e.g. the card was deleted mid-spin. */
-const SPIN_TIMEOUT_MS = 7000;
-const LANDED_GRACE_MS = 100;
+const PROPERTIES: SubscribeableKey[] = [
+    "type",
+    "meta",
+    "frameId",
+    "x",
+    "y",
+    "width",
+    "height",
+];
+const PLACE_PROPERTIES: SubscribeableKey[] = [...PROPERTIES, "groupId"];
+// A press that moved further than this on screen was a drag, not a click.
+const CLICK_SLOP_PX = 6;
+/** Panel edits wait this long for the next keystroke before they replace the wheel. */
+export const EDIT_DELAY_MS = 600;
+const WAKE_SLACK_MS = 15;
+const PREFS_KEY = "prefs";
 
-type Deps = {
-    seed?: () => number;
-    jitter?: () => number;
+export type Env = {
+    now: () => number;
+    setTimeout: (fn: () => void, ms: number) => unknown;
+    clearTimeout: (handle: unknown) => void;
+    seed: () => number;
+    /** An index below n: which remaining entry a spin lands on. */
+    pick: (n: number) => number;
+    newId: () => string;
 };
 
-type Mine = { stickyId: string | null };
+const realEnv: Env = {
+    now: () => Date.now(),
+    setTimeout: (fn, ms) => setTimeout(fn, ms),
+    clearTimeout: (handle) =>
+        clearTimeout(handle as ReturnType<typeof setTimeout>),
+    seed: randomSeed,
+    pick: randomBelow,
+    newId: randomId,
+};
 
-function stylingCssVars(styling: ModuleStyling): string {
+type Point = { x: number; y: number };
+/** A wheel named by its element, and by its wheel id in case another screen replaced that element. */
+type Ref = { el: string; wheelId?: string };
+type Press = { dom: Point; canvas: Point };
+
+type Pending = {
+    el: string;
+    wheelId: string;
+    entries: Entry[];
+    removePicked: boolean;
+    due: number;
+    queued: boolean;
+};
+
+type State = {
+    driverId: string;
+    issueCommand: DriverCommandIssuer;
+    generateId: () => string;
+    styling: ModuleStyling;
+    buttonId: string;
+    webviewId: string;
+    panel: boolean;
+    sound: boolean;
+    wheels: Map<string, Placed>;
+    moved: Map<string, string>;
+    pending: Map<string, Pending>;
+    down: Press | null;
+    selection: string[];
+    target: string | null;
+    targetKey: string | null;
+    view: Rect | null;
+    wake: unknown;
+    lastPanel: string;
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+
+export function stylingCssVars(styling: ModuleStyling): string {
     const { tokens, ...flat } = styling as ModuleStyling & {
         tokens?: Record<string, string>;
     };
     const vars = Object.entries(flat).map(([key, value]) =>
         key === "theme"
             ? `color-scheme: ${value};`
-            : `--drawdy-${key.replace(
-                  /[A-Z]/g,
-                  (c) => `-${c.toLowerCase()}`
-              )}: ${value};`
+            : `--drawdy-${key.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}: ${value};`
     );
     for (const [name, value] of Object.entries(tokens ?? {}))
         vars.push(`${name}: ${value};`);
     return vars.join("");
 }
 
-function overlayColours(styling: ModuleStyling): OverlayColours {
-    const dark = styling.theme !== "light";
-    const tokens = (styling.tokens ?? {}) as Partial<Record<string, string>>;
-    return {
-        panel: tokens["--dd-surface-panel"] ?? (dark ? "#1f1f23" : "#ffffff"),
-        fg:
-            tokens["--dd-text-primary"] ??
-            (dark ? "rgba(255,255,255,0.95)" : "#18181b"),
-        muted:
-            tokens["--dd-text-tertiary"] ??
-            (dark ? "rgba(255,255,255,0.5)" : "rgba(24,24,27,0.5)"),
-        line:
-            tokens["--dd-border-strong"] ??
-            (dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"),
-        accent: tokens["--dd-accent"] ?? "#c5f601",
-        onAccent: tokens["--dd-on-accent"] ?? "#090909",
-    };
+function rectOf(el: SubscribedDrawdyElement): Rect | null {
+    const { x, y, width, height } = el;
+    return typeof x === "number" &&
+        typeof y === "number" &&
+        typeof width === "number" &&
+        typeof height === "number"
+        ? { x, y, width, height }
+        : null;
 }
 
-export function createSpin(deps: Deps = {}): DriverModule {
-    const nextSeed = deps.seed ?? randomSeed;
-    const nextJitter = deps.jitter ?? (() => Math.random());
+/** Widgets stacked on one spot for one wheel read as a single wheel. */
+function countWheels(entries: Iterable<Placed>): number {
+    const seen: Placed[] = [];
+    for (const e of entries)
+        if (
+            !seen.some(
+                (o) =>
+                    o.wheel.wheelId === e.wheel.wheelId &&
+                    sameRect(o.rect, e.rect)
+            )
+        )
+            seen.push(e);
+    return seen.length;
+}
 
-    let issueCommand: DriverCommandIssuer | null = null;
-    let manifest: DriverManifest | null = null;
-    let generateId: () => string = () => "";
-    let styling = {} as ModuleStyling;
-    let driverId = "";
-    let buttonId = "";
-    let webviewId = "";
-    let requestNo = 0;
-    let panelOpen = false;
-    let spinning = false;
-    let spinNo = 0;
-    let selectionWatched = false;
-    let presenceWatched = false;
-    let lastNames = "";
+export function createSpin(overrides: Partial<Env> = {}): DriverModule {
+    const env: Env = { ...realEnv, ...overrides };
+    let d: State | null = null;
+    let requestId = 0;
+    let chain: Promise<void> = Promise.resolve();
 
-    const seen = new Set<string>();
-    const mine = new Map<string, Mine>();
-    const overlays = new Map<string, string>();
-
-    const stamp = () => ({ driverId, requestId: String(requestNo++) });
-
-    function send<R extends DriverCommandRequest>(
-        request: R
-    ): Promise<DriverCommandResponseFor<R>> {
-        const failed = {
-            res: { error: { type: "runtime" } },
-        } as DriverCommandResponseFor<R>;
-        if (!issueCommand) return Promise.resolve(failed);
-        return issueCommand(request).catch(() => failed);
-    }
-
-    function later(at: number, task: () => Promise<void> | void): void {
-        setTimeout(
-            () =>
-                void Promise.resolve()
-                    .then(task)
-                    .catch(() => undefined),
-            Math.max(0, at - Date.now())
-        );
-    }
-
-    async function post(message: DriverToWebview): Promise<boolean> {
-        const sent = await send({
-            type: "command:webview:post-message",
-            ...stamp(),
-            req: { webviewDomId: webviewId, message },
-        });
-        const posted =
-            sent.res.error === undefined && sent.res.value.posted === true;
-        if (!posted) panelOpen = false;
-        return posted;
-    }
-
-    const placeCtx = () => ({
-        issueCommand: issueCommand as DriverCommandIssuer,
-        driverId,
-        nextRequestId: () => String(requestNo++),
-        webviewDomId: webviewId,
+    const stamp = (s: State) => ({
+        driverId: s.driverId,
+        requestId: String(requestId++),
     });
 
-    async function openPanel(): Promise<void> {
-        await send({
-            type: "command:webview:create",
-            ...stamp(),
-            req: {
-                webviewDomId: webviewId,
-                htmlContent: WEBVIEW_HTML.replace(
-                    "/*__DRAWDY_STYLING__*/",
-                    stylingCssVars(styling)
-                ),
-                keepStateWhenClosed: false,
-            },
+    function enqueue(task: () => Promise<void>): Promise<void> {
+        const next = chain.then(task).catch((err) => {
+            console.error(`[${d?.driverId}] ${String(err)}`);
         });
+        chain = next;
+        return next;
     }
 
-    async function loadSettings(): Promise<void> {
-        const got = await send({
-            type: "command:kv-storage:get",
-            ...stamp(),
-            req: { key: SETTINGS_KEY },
-        });
-        const raw = got.res.error === undefined ? got.res.value.got : undefined;
-        await post({
-            type: "init",
-            settings: raw ? normalizeSettings(raw) : null,
-        });
+    function post(s: State, message: DriverToWebview): void {
+        if (!s.panel) return;
+        void s
+            .issueCommand({
+                type: "command:webview:post-message",
+                ...stamp(s),
+                req: { webviewDomId: s.webviewId, message },
+            })
+            .catch(() => undefined);
     }
 
-    async function watchSelection(): Promise<void> {
-        if (!selectionWatched) {
-            selectionWatched = true;
-            await send({
-                type: "subscription:scene:drawdy-element-selection",
-                ...stamp(),
+    function fail(s: State, type: string | undefined): void {
+        const reason: PanelError =
+            type === "unauthorized" ? "denied" : "failed";
+        post(s, { type: "error", reason });
+    }
+
+    async function loadPrefs(s: State): Promise<void> {
+        try {
+            const got = await s.issueCommand({
+                type: "command:kv-storage:get",
+                ...stamp(s),
+                req: { key: PREFS_KEY },
             });
+            if (got.res.error === undefined)
+                s.sound = got.res.value.got?.sound === true;
+        } catch {
+            return;
         }
-        const selected = await send({
-            type: "command:scene:get-current-selected-drawdy-elements",
-            ...stamp(),
-        });
-        if (selected.res.error === undefined)
-            await sendStickies(selected.res.value.drawdyElementIds);
     }
 
-    async function sendStickies(ids: readonly string[]): Promise<void> {
-        let items: StickyItem[] = [];
-        if (ids.length > 0) {
-            const got = await send({
+    async function fetchElements(
+        s: State,
+        ids?: string[],
+        properties: SubscribeableKey[] = PROPERTIES
+    ): Promise<SubscribedDrawdyElement[]> {
+        try {
+            const res = await s.issueCommand({
                 type: "command:scene:get-drawdy-elements",
-                ...stamp(),
-                req: {
-                    properties: ["type", "componentType", "text"],
-                    drawdyElementIds: ids.slice(0, MAX_ENTRIES * 2),
-                },
+                ...stamp(s),
+                req: { properties, drawdyElementIds: ids },
             });
-            if (got.res.error !== undefined) return;
-            const order = new Map(ids.map((id, i) => [id, i]));
-            items = got.res.value.drawdyElements
-                .filter((el) => el.componentType === "sticky-note")
-                .sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
-                .map((el) => ({ id: el.id, label: firstLine(el.text) }))
-                .filter((item) => item.label !== "")
-                .slice(0, MAX_ENTRIES);
+            return res.res.error === undefined
+                ? res.res.value.drawdyElements
+                : [];
+        } catch {
+            return [];
         }
-        await post({ type: "stickies", items });
     }
 
-    function namesOf(users: readonly CollaborationUserPresence[]): string[] {
-        return distinctNames(
-            [...users]
-                .map((u) => u.name)
-                .sort((a, b) =>
-                    a.localeCompare(b, undefined, { sensitivity: "base" })
-                )
+    async function readView(s: State): Promise<void> {
+        try {
+            const view = await s.issueCommand({
+                type: "command:camera:get-viewport-rect",
+                ...stamp(s),
+            });
+            if (view.res.error === undefined) s.view = view.res.value.rect;
+        } catch {
+            return;
+        }
+    }
+
+    function absorb(
+        s: State,
+        elements: readonly SubscribedDrawdyElement[]
+    ): boolean {
+        let changed = false;
+        for (const el of elements) {
+            const prev = s.wheels.get(el.id);
+            const component = el.type
+                ? el.type === "component"
+                : prev !== undefined;
+            const wheel = !component
+                ? null
+                : el.meta === undefined && prev
+                  ? prev.wheel
+                  : readWheel(el.meta?.[s.driverId]);
+            if (wheel) {
+                const rect = rectOf(el) ?? prev?.rect ?? null;
+                if (
+                    !prev ||
+                    !sameWheel(prev.wheel, wheel) ||
+                    !sameRect(prev.rect, rect)
+                ) {
+                    s.wheels.set(el.id, { el: el.id, wheel, rect });
+                    changed = true;
+                }
+                continue;
+            }
+            if (s.wheels.delete(el.id)) changed = true;
+        }
+        return changed;
+    }
+
+    function forget(s: State, ids: readonly string[]): void {
+        for (const id of ids) s.wheels.delete(id);
+    }
+
+    /** Follows a wheel through this screen's replacements, so a press sent just before one still lands. */
+    function resolve(s: State, id: string): string {
+        const seen = new Set<string>();
+        let at = id;
+        while (!s.wheels.has(at) && s.moved.has(at) && !seen.has(at)) {
+            seen.add(at);
+            at = s.moved.get(at)!;
+        }
+        return at;
+    }
+
+    /** The newest widget of a wheel, which another screen may have replaced. */
+    function byWheelId(s: State, wheelId: string): Placed | null {
+        let found: Placed | null = null;
+        for (const entry of s.wheels.values())
+            if (entry.wheel.wheelId === wheelId) found = entry;
+        return found;
+    }
+
+    function find(s: State, el: string, wheelId?: string): Placed | null {
+        return (
+            s.wheels.get(resolve(s, el)) ??
+            (wheelId ? byWheelId(s, wheelId) : null)
         );
     }
 
-    async function sendPeople(): Promise<void> {
-        const got = await send({
-            type: "command:collaboration:get-all-users-in-board",
-            ...stamp(),
-        });
-        if (got.res.error !== undefined) {
-            await post({ type: "people", status: "blocked", names: [] });
-            return;
+    function selectedWheel(s: State): string | null {
+        return s.selection.find((id) => s.wheels.has(id)) ?? null;
+    }
+
+    function remember(s: State, id: string): string {
+        s.target = id;
+        s.targetKey = s.wheels.get(id)?.wheel.wheelId ?? null;
+        return id;
+    }
+
+    /** The selected wheel, else the one last shown, found again by its wheel id after a replacement, else the newest. */
+    function targetId(s: State): string | null {
+        const selected = selectedWheel(s);
+        if (selected) return remember(s, selected);
+        if (s.target) {
+            const target = resolve(s, s.target);
+            if (s.wheels.has(target)) return remember(s, target);
+            const same = s.targetKey ? byWheelId(s, s.targetKey) : null;
+            if (same) return remember(s, same.el);
         }
-        const names = namesOf(got.res.value.users);
-        lastNames = names.join("\n");
-        await post({ type: "people", status: "ok", names });
-        if (presenceWatched) return;
-        presenceWatched = true;
-        await send({
-            type: "subscription:collaboration:presence-changed",
-            ...stamp(),
-        });
+        return [...s.wheels.keys()].at(-1) ?? null;
     }
 
-    async function onPresence(
-        users: readonly CollaborationUserPresence[]
-    ): Promise<void> {
-        const names = namesOf(users);
-        const key = names.join("\n");
-        if (key === lastNames || !panelOpen) return;
-        lastNames = key;
-        await post({ type: "people", status: "ok", names });
+    /** A wheel with any edit still waiting to be written laid over it. */
+    function withPending(s: State, entry: Placed): Wheel {
+        const p = s.pending.get(entry.wheel.wheelId);
+        return p ? edited(entry.wheel, p.entries, p.removePicked) : entry.wheel;
     }
 
-    /** Sweeps for cards whose spinner left before revealing them. */
-    async function revealStranded(): Promise<void> {
-        const got = await send({
-            type: "command:scene:get-drawdy-elements",
-            ...stamp(),
-            req: { properties: [...CARD_PROPERTIES] },
-        });
-        if (got.res.error !== undefined) return;
-        for (const el of got.res.value.drawdyElements) onCard(el);
-    }
-
-    /** The part of the view a card can land in: left of the panel and between the host's top and bottom bars. */
-    async function boardArea(): Promise<Rect | null> {
-        const area = await visibleArea(placeCtx());
-        if (!area) return null;
-        const camera = await send({
-            type: "command:camera:get-info",
-            ...stamp(),
-        });
-        const zoom =
-            camera.res.error === undefined && camera.res.value.zoom > 0
-                ? camera.res.value.zoom
-                : 1;
-        const bar = HOST_BAR_PX / zoom;
-        return area.height > 4 * bar
-            ? { ...area, y: area.y + bar, height: area.height - 2 * bar }
-            : area;
-    }
-
-    function failSpin(reason: ErrorReason): void {
-        spinning = false;
-        void post({ type: "error", reason });
-    }
-
-    async function spin(request: SpinRequest): Promise<void> {
-        if (spinning) return;
-        if (!MODES.includes(request?.mode) || !SOURCES.includes(request.source))
-            return;
-        spinning = true;
-        const { mode, source } = request;
-        const options = normalizeOptions(request.options);
-        const pairs = usesEntries(mode)
-            ? (Array.isArray(request.entries) ? request.entries : [])
-                  .map((label, i) => ({
-                      label: typeof label === "string" ? cleanLabel(label) : "",
-                      stickyId:
-                          source === "stickies"
-                              ? request.stickyIds?.[i] || null
-                              : null,
-                  }))
-                  .filter((p) => p.label !== "")
-                  .slice(0, MAX_ENTRIES)
-            : [];
-        if (usesEntries(mode) && pairs.length < MIN_ENTRIES) {
-            failSpin("too-few");
-            return;
-        }
-        const entries = pairs.map((p) => p.label);
-        const seed = nextSeed() >>> 0;
-        const result = computeResult(mode, seed, entries.length, options);
-        const draft: SpinMeta = {
-            v: 1,
-            seed,
-            startedAt: 0,
-            mode,
-            source: usesEntries(mode) ? source : null,
-            entries,
-            result,
+    function syncPanel(s: State, force = false): void {
+        if (!s.panel) return;
+        const id = targetId(s);
+        const entry = id ? s.wheels.get(id) : undefined;
+        const wheel: PanelWheel | null = entry
+            ? { ...withPending(s, entry), el: entry.el }
+            : null;
+        const message: DriverToWebview = {
+            type: "state",
+            wheel,
+            count: countWheels(s.wheels.values()),
+            sound: s.sound,
         };
-        const layout = cardLayout(draft);
-        const area = await boardArea();
-        const centred: Rect = area
-            ? centredIn(area, layout.width, layout.height)
-            : { x: 0, y: 0, width: layout.width, height: layout.height };
-        const { x, y } = area
-            ? await findCardSpot(placeCtx(), centred, area)
-            : centred;
+        const serialized = JSON.stringify(message);
+        if (!force && serialized === s.lastPanel) return;
+        s.lastPanel = serialized;
+        post(s, message);
+    }
 
-        // The timeline starts once the card goes out, not when the panel asked.
-        const meta: SpinMeta = { ...draft, startedAt: Date.now() };
-        const cardId = generateId();
-        mine.set(cardId, {
-            stickyId:
-                result.mode === "wheel"
-                    ? (pairs[result.index]?.stickyId ?? null)
-                    : null,
-        });
-        const added = await send({
-            type: "command:scene:add-drawdy-elements",
-            ...stamp(),
-            req: {
-                elements: [
-                    {
-                        type: "shape",
-                        componentType: "sticky-note",
-                        drawdyElementId: cardId,
-                        x,
-                        y,
-                        width: layout.width,
-                        height: layout.height,
-                        fillColor: layout.fill,
-                        text: layout.text,
-                        fontSize: layout.fontSize,
-                        textAlign: layout.align,
-                        opacity: 0,
-                        meta: { [driverId]: meta },
-                    },
-                ],
+    /** An edit waits for the typing to stop, and for a spin in flight to land, so no one sees a spin change course. */
+    function dueAt(s: State, p: Pending): number {
+        const entry = find(s, p.el, p.wheelId);
+        const lands = entry ? landsAt(entry.wheel) : null;
+        return Math.max(p.due, lands ?? -Infinity);
+    }
+
+    function processPending(s: State, now: number): void {
+        for (const p of [...s.pending.values()]) {
+            if (!find(s, p.el, p.wheelId)) {
+                s.pending.delete(p.wheelId);
+                continue;
+            }
+            if (p.queued || dueAt(s, p) > now) continue;
+            p.queued = true;
+            const wheelId = p.wheelId;
+            void enqueue(() => flush(s, wheelId));
+        }
+    }
+
+    function schedule(s: State, now: number): void {
+        if (s.wake !== null) env.clearTimeout(s.wake);
+        s.wake = null;
+        let at = Infinity;
+        for (const p of s.pending.values())
+            if (!p.queued) at = Math.min(at, dueAt(s, p));
+        if (!Number.isFinite(at)) return;
+        s.wake = env.setTimeout(
+            () => {
+                s.wake = null;
+                if (d === s) refresh(s);
             },
+            Math.max(0, at - now) + WAKE_SLACK_MS
+        );
+    }
+
+    function refresh(s: State): void {
+        const now = env.now();
+        processPending(s, now);
+        syncPanel(s);
+        schedule(s, now);
+    }
+
+    function placeCtx(s: State) {
+        return {
+            issueCommand: s.issueCommand,
+            driverId: s.driverId,
+            nextRequestId: () => String(requestId++),
+            webviewDomId: s.webviewId,
+        };
+    }
+
+    /** One change is a new widget with the new state at the old one's place, then the old one removed. */
+    async function replace(
+        s: State,
+        entry: Placed,
+        next: Wheel
+    ): Promise<Placed | null> {
+        const [current] = await fetchElements(s, [entry.el], PLACE_PROPERTIES);
+        const at = current ? rectOf(current) : null;
+        if (!current || !at) {
+            forget(s, [entry.el]);
+            refresh(s);
+            return null;
+        }
+        const newId = s.generateId();
+        const plan = planReplacement({
+            driverId: s.driverId,
+            old: { ...entry, rect: at },
+            at,
+            others: [...s.wheels.values()].filter((o) => o.el !== entry.el),
+            next,
+            newId,
+            place: { frameId: current.frameId, groupId: current.groupId },
+        });
+        const added = await s.issueCommand({
+            type: "command:scene:add-drawdy-elements",
+            ...stamp(s),
+            req: { elements: [plan.element] },
         });
         if (added.res.error !== undefined) {
-            mine.delete(cardId);
-            failSpin(
-                added.res.error.type === "unauthorized" ? "blocked" : "failed"
-            );
+            fail(s, added.res.error.type);
+            return null;
+        }
+        const placed: Placed = {
+            el: newId,
+            wheel: plan.wheel,
+            rect: plan.rect,
+        };
+        s.wheels.set(newId, placed);
+        const reselect = plan.remove.some((r) => s.selection.includes(r));
+        const removed = await s.issueCommand({
+            type: "command:scene:remove-drawdy-elements",
+            ...stamp(s),
+            req: { drawdyElementIds: plan.remove },
+        });
+        if (removed.res.error !== undefined) fail(s, removed.res.error.type);
+        else {
+            forget(s, plan.remove);
+            for (const gone of plan.remove) s.moved.set(gone, newId);
+        }
+        if (s.target === null || plan.remove.includes(s.target)) {
+            s.target = newId;
+            s.targetKey = plan.wheel.wheelId;
+        }
+        refresh(s);
+        if (reselect) {
+            s.selection = [newId];
+            await s
+                .issueCommand({
+                    type: "command:scene:set-selection",
+                    ...stamp(s),
+                    req: { drawdyElementIds: [newId] },
+                })
+                .catch(() => undefined);
+        }
+        return placed;
+    }
+
+    /** Applies a press to a wheel, together with any edit still waiting, in one replacement. */
+    async function gesture(
+        s: State,
+        ref: Ref,
+        change: (wheel: Wheel, now: number) => Wheel | null
+    ): Promise<Wheel | null> {
+        const entry = find(s, ref.el, ref.wheelId);
+        if (!entry) return null;
+        const now = env.now();
+        const next = change(withPending(s, entry), now);
+        if (!next) return null;
+        s.pending.delete(entry.wheel.wheelId);
+        if (sameWheel(next, entry.wheel)) {
+            refresh(s);
+            return null;
+        }
+        return (await replace(s, entry, next))?.wheel ?? null;
+    }
+
+    async function flush(s: State, wheelId: string): Promise<void> {
+        const p = s.pending.get(wheelId);
+        if (!p) return;
+        p.queued = false;
+        const entry = find(s, p.el, wheelId);
+        const now = env.now();
+        if (!entry) {
+            s.pending.delete(wheelId);
             return;
         }
-        const thisSpin = ++spinNo;
-        later(meta.startedAt + SPIN_TIMEOUT_MS, () => {
-            if (spinNo === thisSpin) spinning = false;
-        });
-        await post({
-            type: "spun",
-            cardId,
-            startedAt: meta.startedAt,
-            plan: planFor(meta),
-            label: resultLabel(meta),
-            prompt:
-                result.mode === "warmup"
-                    ? { lang: result.lang, index: result.prompt }
-                    : null,
-        });
-        onCard({ id: cardId, meta: { [driverId]: meta }, opacity: 0 });
+        if (dueAt(s, p) > now || isSpinning(entry.wheel, now)) {
+            refresh(s);
+            return;
+        }
+        s.pending.delete(wheelId);
+        const next = edited(entry.wheel, p.entries, p.removePicked);
+        if (sameWheel(next, entry.wheel)) {
+            refresh(s);
+            return;
+        }
+        await replace(s, entry, next);
     }
 
-    function onCard(el: SubscribedDrawdyElement): void {
-        const meta = readSpin(el.meta, driverId);
-        if (!meta || seen.has(el.id)) return;
-        seen.add(el.id);
-        const plan = arrival({
-            startedAt: meta.startedAt,
-            now: Date.now(),
-            opacity: el.opacity,
-            mine: mine.has(el.id),
-            jitter: nextJitter() * FALLBACK_JITTER_MS,
-        });
-        if (plan.animate && plan.removeAt !== null)
-            void showOverlay(el.id, meta, plan.localStart, plan.removeAt);
-        if (plan.revealAt !== null)
-            later(plan.revealAt, () => revealMine(el.id));
-        if (plan.fallbackAt !== null)
-            later(plan.fallbackAt, () => revealIfHidden(el.id));
-    }
-
-    async function overlayArea(): Promise<Rect | null> {
-        const view = await send({
-            type: "command:camera:get-viewport-rect",
-            ...stamp(),
-        });
-        if (view.res.error !== undefined) return null;
-        const r = view.res.value.rect;
-        const [tl, br] = await Promise.all(
-            [
-                { x: r.x, y: r.y },
-                { x: r.x + r.width, y: r.y + r.height },
-            ].map((p) =>
-                send({
-                    type: "command:camera:canvas-to-screen",
-                    ...stamp(),
-                    req: p,
-                })
-            )
-        );
-        if (tl.res.error !== undefined || br.res.error !== undefined)
-            return null;
-        let right = br.res.value.x;
-        if (panelOpen) {
-            const drawer = await send({
-                type: "command:dom:element-rect",
-                ...stamp(),
-                req: { elementId: webviewId },
+    /**
+     * Spin lands on a remaining entry this screen draws with crypto randomness.
+     * When nothing is left the hub reads Reset, so a press puts everyone back.
+     */
+    async function pressSpin(s: State, ref: Ref): Promise<void> {
+        const next = await gesture(s, ref, (wheel, now) => {
+            if (isSpinning(wheel, now)) return null;
+            const turned = spun(wheel, {
+                seed: env.seed(),
+                pick: env.pick,
+                now,
             });
-            if (drawer.res.error === undefined && drawer.res.value.width > 0)
-                right = Math.min(right, drawer.res.value.x - DRAWER_GAP_PX);
-        }
-        const { x, y } = tl.res.value;
-        const width = right - x;
-        const height = br.res.value.y - y;
-        return width > 0 && height > 0 ? { x, y, width, height } : null;
+            if (turned) return turned;
+            return remaining(wheel).length === 0 && canReset(wheel)
+                ? reset(wheel)
+                : null;
+        });
+        if (!next?.lastSpin || !s.sound) return;
+        const plan = planOf(next);
+        if (plan)
+            post(s, {
+                type: "spun",
+                startedAt: next.lastSpin.startedAt,
+                ticks: tickTimes(plan),
+            });
     }
 
-    async function showOverlay(
-        cardId: string,
-        meta: SpinMeta,
-        localStart: number,
-        removeAt: number
-    ): Promise<void> {
-        const plan = planFor(meta);
-        const design = designSize(plan);
-        const area = (await overlayArea()) ?? {
-            x: 0,
-            y: 0,
-            width: design.width,
-            height: design.height,
-        };
-        const scale = Math.min(
-            1,
-            (area.width * 0.9) / design.width,
-            (area.height * 0.88) / design.height
+    async function pressReset(s: State, ref: Ref): Promise<void> {
+        await gesture(s, ref, (wheel, now) =>
+            !isSpinning(wheel, now) && canReset(wheel) ? reset(wheel) : null
         );
-        const width = Math.round(design.width * scale);
-        const height = Math.round(design.height * scale);
-        for (const id of [...overlays.keys()]) removeOverlay(id);
-        const domId = `${driverId}:overlay:${cardId}`;
-        overlays.set(cardId, domId);
-        await send({
-            type: "command:dom:create-floating-element",
-            ...stamp(),
-            req: {
-                domId,
-                position: {
-                    x: Math.round(area.x + (area.width - width) / 2),
-                    y: Math.round(area.y + (area.height - height) / 2),
-                },
-                asPopover: false,
-                schema: {
-                    type: "iframe",
-                    label: "Spin",
-                    child: {
-                        srcDoc: overlayDoc(OVERLAY_HTML, {
-                            plan,
-                            localStart,
-                            holdMs: HOLD_MS,
-                            fadeMs: FADE_MS,
-                            theme: styling.theme === "light" ? "light" : "dark",
-                            colours: overlayColours(styling),
-                        }),
-                    },
-                    styles: {
-                        width: [width, "px"],
-                        height: [height, "px"],
-                        pointerEvents: "none",
-                    },
-                },
-            },
-        });
-        later(removeAt + LANDED_GRACE_MS, () => removeOverlay(cardId));
     }
 
-    function removeOverlay(cardId: string): void {
-        const domId = overlays.get(cardId);
-        if (!domId) return;
-        overlays.delete(cardId);
-        void send({
-            type: "command:dom:remove-floating-element",
-            ...stamp(),
-            req: { domId },
-        });
-    }
-
-    async function revealMine(cardId: string): Promise<void> {
-        const own = mine.get(cardId);
-        mine.delete(cardId);
-        await send({
-            type: "command:scene:update-drawdy-elements",
-            ...stamp(),
-            req: {
-                updates: [
-                    { drawdyElementId: cardId, properties: { opacity: 1 } },
-                ],
-            },
-        });
-        spinning = false;
-        await post({ type: "landed", cardId });
-        if (own?.stickyId) await showSticky(own.stickyId);
-    }
-
-    /** Selects the winning sticky and, if it is out of view, flies to it, clear of the panel. */
-    async function showSticky(id: string): Promise<void> {
-        await send({
-            type: "command:scene:set-selection",
-            ...stamp(),
-            req: { drawdyElementIds: [id] },
-        });
-        const rects = await send({
-            type: "command:scene:element-rects",
-            ...stamp(),
-            req: { drawdyElementIds: [id] },
-        });
-        const rect =
-            rects.res.error === undefined
-                ? rects.res.value.rects[0]?.rect
-                : undefined;
-        if (!rect) return;
-        const area = await boardArea();
-        if (area && contains(area, rect)) return;
-        const [view, camera] = await Promise.all([
-            send({ type: "command:camera:get-viewport-rect", ...stamp() }),
-            send({ type: "command:camera:get-info", ...stamp() }),
-        ]);
-        const covered =
-            area && view.res.error === undefined
-                ? view.res.value.rect.x +
-                  view.res.value.rect.width -
-                  (area.x + area.width)
-                : 0;
-        await send({
-            type: "command:camera:fly-to-rect",
-            ...stamp(),
-            req: {
-                rect: { ...rect, width: rect.width + Math.max(0, covered) },
-                flyDurationMs: FLY_MS,
-                zoom:
-                    camera.res.error === undefined && camera.res.value.zoom > 0
-                        ? camera.res.value.zoom
-                        : 1,
-            },
-        });
-    }
-
-    async function revealIfHidden(cardId: string): Promise<void> {
-        const got = await send({
-            type: "command:scene:get-drawdy-elements",
-            ...stamp(),
-            req: { properties: ["opacity"], drawdyElementIds: [cardId] },
-        });
-        if (got.res.error !== undefined) return;
-        const [card] = got.res.value.drawdyElements;
-        if (!card || card.opacity !== 0) return;
-        await send({
-            type: "command:scene:update-drawdy-elements",
-            ...stamp(),
-            req: {
-                updates: [
-                    { drawdyElementId: cardId, properties: { opacity: 1 } },
-                ],
-            },
-        });
-    }
-
-    async function handleMessage(message: WebviewToDriver): Promise<void> {
-        switch (message.type) {
-            case "ready":
-                panelOpen = true;
-                await loadSettings();
-                await revealStranded();
-                return;
-            case "stickies":
-                await watchSelection();
-                return;
-            case "save":
-                await send({
-                    type: "command:kv-storage:set",
-                    ...stamp(),
-                    req: {
-                        key: SETTINGS_KEY,
-                        payload: normalizeSettings(message.settings),
-                    },
-                });
-                return;
-            case "people":
-                await sendPeople();
-                return;
-            case "spin":
-                await spin(message.request);
-                return;
+    /**
+     * A click on a wheel's hub or Reset pill is a press. Several widgets sit
+     * under one click only when stacked, and the one added last, which Drawdy
+     * draws on top, is the one pressed.
+     */
+    async function clickAt(
+        s: State,
+        ids: readonly string[],
+        point: Point
+    ): Promise<void> {
+        const clicked = new Set(ids);
+        const hits = [...s.wheels.values()].filter((e) => clicked.has(e.el));
+        for (const entry of hits.reverse()) {
+            const button =
+                entry.rect && buttonAt(entry.rect, entry.wheel, point);
+            if (!button) continue;
+            remember(s, entry.el);
+            if (button === "spin") await pressSpin(s, { el: entry.el });
+            else await pressReset(s, { el: entry.el });
+            return;
         }
     }
 
-    const activate: DriverModule["activate"] = async (args) => {
-        issueCommand = args.issueCommand;
-        manifest = args.manifest;
-        generateId = args.generateId;
-        styling = args.styling;
-        driverId = manifest.driverId;
-        buttonId = `${driverId}:action-button`;
-        webviewId = `${driverId}:webview`;
+    function queueEdit(
+        s: State,
+        ref: Ref,
+        entries: Entry[],
+        removePicked: boolean,
+        delay: number
+    ): void {
+        const entry = find(s, ref.el, ref.wheelId);
+        if (!entry) return;
+        const wheelId = entry.wheel.wheelId;
+        s.pending.set(wheelId, {
+            el: entry.el,
+            wheelId,
+            entries,
+            removePicked,
+            due: env.now() + delay,
+            queued: false,
+        });
+        refresh(s);
+    }
 
-        const created = await send({
-            type: "command:dom:create-action-button",
-            ...stamp(),
-            req: { domElementId: buttonId, svg: ACTION_BUTTON_SVG },
+    async function people(s: State): Promise<string[] | null> {
+        try {
+            const got = await s.issueCommand({
+                type: "command:collaboration:get-all-users-in-board",
+                ...stamp(s),
+            });
+            return got.res.error === undefined
+                ? got.res.value.users.map((u) => u.name)
+                : null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** A preset is an edit with fresh entries, written at once or as soon as a spin in flight lands. */
+    async function applyPreset(
+        s: State,
+        ref: Ref,
+        preset: Preset
+    ): Promise<void> {
+        const entry = find(s, ref.el, ref.wheelId);
+        if (!entry) return;
+        let names: string[] | undefined;
+        if (preset === "people") {
+            const found = await people(s);
+            if (!found)
+                return post(s, { type: "error", reason: "people-blocked" });
+            if (found.length < 2)
+                return post(s, { type: "error", reason: "alone" });
+            names = found;
+        }
+        const entries = presetEntries(preset, {
+            newId: env.newId,
+            pick: env.pick,
+            names,
+        });
+        queueEdit(
+            s,
+            { el: entry.el },
+            entries,
+            withPending(s, entry).removePicked,
+            0
+        );
+    }
+
+    async function addWheel(
+        s: State,
+        from?: Wheel,
+        near?: Rect
+    ): Promise<void> {
+        const { width, height } = near ?? WIDGET_SIZE;
+        let preferred: Rect;
+        if (near) {
+            preferred = { ...near, x: near.x + near.width + PLACE_GAP };
+        } else {
+            const area = await visibleArea(placeCtx(s));
+            const centred = area
+                ? centredIn(area, width, height)
+                : { x: 0, y: 0, width, height };
+            preferred = {
+                ...centred,
+                x: Math.round(centred.x),
+                y: Math.round(centred.y),
+            };
+        }
+        const spot = await findFreeRect(placeCtx(s), preferred);
+        const id = s.generateId();
+        const wheel = newWheel(
+            id,
+            from
+                ? from.entries.map((e) => ({ ...e }))
+                : presetEntries("lunch", { newId: env.newId, pick: env.pick }),
+            from?.removePicked ?? true
+        );
+        const added = await s.issueCommand({
+            type: "command:scene:add-drawdy-elements",
+            ...stamp(s),
+            req: { elements: [widgetElement(s.driverId, id, wheel, spot)] },
+        });
+        if (added.res.error !== undefined) {
+            fail(s, added.res.error.type);
+            return;
+        }
+        if (!s.wheels.has(id)) s.wheels.set(id, { el: id, wheel, rect: spot });
+        remember(s, id);
+        s.selection = [id];
+        refresh(s);
+        await revealAndSelect(placeCtx(s), [id], spot);
+    }
+
+    async function duplicate(s: State, ref: Ref): Promise<void> {
+        const entry = find(s, ref.el, ref.wheelId);
+        if (!entry?.rect) return;
+        await addWheel(s, withPending(s, entry), entry.rect);
+    }
+
+    async function openPanel(s: State): Promise<void> {
+        const created = await s.issueCommand({
+            type: "command:webview:create",
+            ...stamp(s),
+            req: {
+                webviewDomId: s.webviewId,
+                htmlContent: WEBVIEW_HTML.replace(
+                    "/*__DRAWDY_STYLING__*/",
+                    stylingCssVars(s.styling)
+                ),
+                // Kept alive when closed, so a spin pressed on the board can still tick once a click in the panel unlocked audio.
+                keepStateWhenClosed: true,
+            },
         });
         if (created.res.error !== undefined) return;
+        s.panel = true;
+        await readView(s);
+        const inView = [...s.wheels.values()].filter(
+            (e) => e.rect && s.view && overlaps(e.rect, s.view)
+        );
+        if (inView.length === 0) await addWheel(s);
+        else if (!selectedWheel(s)) remember(s, inView.at(-1)!.el);
+        syncPanel(s, true);
+    }
 
+    async function readSelection(s: State): Promise<void> {
+        try {
+            const res = await s.issueCommand({
+                type: "command:scene:get-current-selected-drawdy-elements",
+                ...stamp(s),
+            });
+            if (res.res.error === undefined)
+                s.selection = res.res.value.drawdyElementIds;
+        } catch {
+            return;
+        }
+    }
+
+    async function handleMessage(
+        s: State,
+        message: WebviewToDriver
+    ): Promise<void> {
+        const ref: Ref | null =
+            "el" in message && typeof message.el === "string"
+                ? {
+                      el: message.el,
+                      wheelId:
+                          typeof message.wheelId === "string"
+                              ? message.wheelId
+                              : undefined,
+                  }
+                : null;
+        switch (message.type) {
+            case "ready":
+                s.panel = true;
+                syncPanel(s, true);
+                return;
+            case "new":
+                return enqueue(() => addWheel(s));
+            case "duplicate":
+                if (ref) return enqueue(() => duplicate(s, ref));
+                return;
+            case "edit":
+                if (ref)
+                    queueEdit(
+                        s,
+                        ref,
+                        normalizeEntries(message.entries),
+                        message.removePicked !== false,
+                        EDIT_DELAY_MS
+                    );
+                return;
+            case "preset":
+                if (ref && PRESETS.includes(message.preset))
+                    return enqueue(() => applyPreset(s, ref, message.preset));
+                return;
+            case "spin":
+                if (ref) return enqueue(() => pressSpin(s, ref));
+                return;
+            case "reset":
+                if (ref) return enqueue(() => pressReset(s, ref));
+                return;
+            case "sound":
+                s.sound = message.on === true;
+                syncPanel(s);
+                await s
+                    .issueCommand({
+                        type: "command:kv-storage:set",
+                        ...stamp(s),
+                        req: { key: PREFS_KEY, payload: { sound: s.sound } },
+                    })
+                    .catch(() => undefined);
+                return;
+            default:
+                return;
+        }
+    }
+
+    async function subscribe(s: State): Promise<void> {
+        const issue = s.issueCommand;
         await Promise.all([
-            send({
+            issue({
                 type: "subscription:dom:element-clicked",
-                ...stamp(),
-                req: { domElementId: buttonId },
+                ...stamp(s),
+                req: { domElementId: s.buttonId },
             }),
-            send({
+            issue({
                 type: "subscription:webview:message",
-                ...stamp(),
-                req: { webviewDomId: webviewId },
+                ...stamp(s),
+                req: { webviewDomId: s.webviewId },
             }),
-            send({ type: "subscription:dom:theme-changed", ...stamp() }),
-            send({
-                type: "subscription:scene:elements-added",
-                ...stamp(),
-                req: { properties: [...CARD_PROPERTIES] },
-            }),
-            send({
-                type: "subscription:scene:elements-replaced",
-                ...stamp(),
-                req: { properties: [...CARD_PROPERTIES] },
+            issue({ type: "subscription:dom:theme-changed", ...stamp(s) }),
+            issue({ type: "subscription:scene:pointer", ...stamp(s), req: {} }),
+            issue({ type: "subscription:scene:click", ...stamp(s), req: {} }),
+            ...(
+                [
+                    "subscription:scene:elements-added",
+                    "subscription:scene:elements-updated",
+                    "subscription:scene:elements-removed",
+                    "subscription:scene:elements-replaced",
+                ] as const
+            ).map((type) =>
+                issue({ type, ...stamp(s), req: { properties: PROPERTIES } })
+            ),
+            issue({
+                type: "subscription:scene:drawdy-element-selection",
+                ...stamp(s),
             }),
         ]);
+    }
+
+    const activate: DriverModule["activate"] = async ({
+        manifest,
+        issueCommand,
+        styling,
+        generateId,
+    }) => {
+        const driverId = manifest.driverId;
+        const s: State = {
+            driverId,
+            issueCommand,
+            generateId,
+            styling,
+            buttonId: `${driverId}:action-button`,
+            webviewId: `${driverId}:webview`,
+            panel: false,
+            sound: false,
+            wheels: new Map(),
+            moved: new Map(),
+            pending: new Map(),
+            down: null,
+            selection: [],
+            target: null,
+            targetKey: null,
+            view: null,
+            wake: null,
+            lastPanel: "",
+        };
+        const created = await issueCommand({
+            type: "command:dom:create-action-button",
+            ...stamp(s),
+            req: { domElementId: s.buttonId, svg: ACTION_BUTTON_SVG },
+        });
+        if (created.res.error !== undefined) return;
+        d = s;
+        await subscribe(s);
+        await loadPrefs(s);
+        absorb(s, await fetchElements(s));
+        await readSelection(s);
+        refresh(s);
     };
 
-    const onEvent: DriverModule["onEvent"] = async (event) => {
-        if (!issueCommand) return;
+    const onEvent: DriverModule["onEvent"] = async (
+        event: DriverSubscriptionEvent
+    ) => {
+        const s = d;
+        if (!s) return;
         switch (event.type) {
-            case "subscription:dom:element-clicked":
-                if (event.body.domElementId === buttonId) await openPanel();
-                return;
-            case "subscription:webview:message": {
-                if (event.body.webviewDomId !== webviewId) return;
-                const message = event.body.message;
-                if (typeof message !== "object" || message === null) return;
-                await handleMessage(message as WebviewToDriver);
+            case "subscription:dom:element-clicked": {
+                if (event.body.domElementId === s.buttonId)
+                    await enqueue(() => openPanel(s));
                 return;
             }
-            case "subscription:dom:theme-changed":
-                styling = event.body.styling;
-                if (panelOpen)
-                    await post({
-                        type: "theme",
-                        cssVars: stylingCssVars(styling),
-                    });
+            case "subscription:scene:pointer": {
+                if (event.body.type === "down")
+                    s.down = {
+                        dom: event.body.cursor.domSpace,
+                        canvas: event.body.cursor.canvasSpace,
+                    };
                 return;
+            }
+            case "subscription:scene:click": {
+                const down = s.down;
+                s.down = null;
+                const up = event.body.cursor.domSpace;
+                if (
+                    !down ||
+                    Math.hypot(up.x - down.dom.x, up.y - down.dom.y) >
+                        CLICK_SLOP_PX
+                )
+                    return;
+                const ids = event.body.drawdyElementIds;
+                await enqueue(() => clickAt(s, ids, down.canvas));
+                return;
+            }
+            case "subscription:webview:message": {
+                if (event.body.webviewDomId !== s.webviewId) return;
+                if (!isRecord(event.body.message)) return;
+                await handleMessage(s, event.body.message as WebviewToDriver);
+                return;
+            }
+            case "subscription:dom:theme-changed": {
+                s.styling = event.body.styling;
+                post(s, { type: "theme", cssVars: stylingCssVars(s.styling) });
+                return;
+            }
             case "subscription:scene:elements-added":
-            case "subscription:scene:elements-replaced":
-                for (const el of event.body.drawdyElements) onCard(el);
+            case "subscription:scene:elements-updated": {
+                if (absorb(s, event.body.drawdyElements)) refresh(s);
                 return;
-            case "subscription:scene:drawdy-element-selection":
-                if (panelOpen) await sendStickies(event.body.drawdyElementIds);
+            }
+            case "subscription:scene:elements-removed": {
+                const ids = event.body.drawdyElements.map((el) => el.id);
+                if (!ids.some((id) => s.wheels.has(id))) return;
+                forget(s, ids);
+                refresh(s);
                 return;
-            case "subscription:collaboration:presence-changed":
-                await onPresence(event.body.users);
+            }
+            case "subscription:scene:elements-replaced": {
+                s.wheels.clear();
+                absorb(s, event.body.drawdyElements);
+                refresh(s);
                 return;
+            }
+            case "subscription:scene:drawdy-element-selection": {
+                s.selection = event.body.drawdyElementIds;
+                syncPanel(s);
+                return;
+            }
             default:
                 return;
         }

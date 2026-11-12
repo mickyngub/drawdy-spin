@@ -1,0 +1,34 @@
+@layer theme, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+@source "./shell.ts";
+
+/* Fredoka SemiBold, Latin subset (SIL OFL 1.1, face/fonts/OFL.txt); the build inlines it. */
+@font-face {
+    font-family: "Fredoka";
+    font-weight: 600;
+    font-display: block;
+    src: url("__SPIN_FONT__") format("woff2");
+}
+
+/* The canvas reads these through a probe; light-dark() follows the viewer's colour scheme, which Drawdy sets on the iframe. */
+@theme static {
+    --color-paper: light-dark(#ffffff, #1f1f23);
+    --color-ink: light-dark(#1f2550, #141833);
+    --color-ink-soft: light-dark(rgb(31 37 80 / 0.58), rgb(255 255 255 / 0.62));
+    --color-sticker: light-dark(#1f2550, #07080e);
+    --color-edge: light-dark(rgb(0 0 0 / 0), #f6efdc);
+    --color-chip: light-dark(#ffffff, #fff8e8);
+    --color-chip-ink: #1f2550;
+    --color-chip-soft: rgb(31 37 80 / 0.58);
+    --color-lime: #c5f601;
+    --color-veil: light-dark(rgb(255 255 255 / 0.55), rgb(31 31 35 / 0.5));
+    --color-slice-1: light-dark(#ffd3b5, #f9c7a4);
+    --color-slice-2: light-dark(#fff0a3, #f6e38a);
+    --color-slice-3: light-dark(#cdf3a9, #bfe897);
+    --color-slice-4: light-dark(#b9e6ff, #a6dbf7);
+    --color-slice-5: light-dark(#cdd0ff, #bbbff7);
+    --color-slice-6: light-dark(#f0cbff, #e4b8f7);
+    --color-slice-7: light-dark(#ffc6df, #f7b3d1);
+    --color-slice-8: light-dark(#b8f0de, #a4e6d0);
+}

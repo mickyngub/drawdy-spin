@@ -19,6 +19,7 @@
         "@rollup/plugin-typescript": "^12.1.2",
         "@tailwindcss/cli": "4.3.3",
         "@types/node": "^24",
+        "esbuild": "^0.28.2",
         "fflate": "^0.8.2",
         "rollup": "^4.34.0",
         "tailwindcss": "4.3.3",

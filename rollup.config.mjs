@@ -1,4 +1,6 @@
 import typescript from "@rollup/plugin-typescript";
+import { transformSync } from "esbuild";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
@@ -91,41 +93,65 @@ const shell = {
     ],
 };
 
-function overlayDocument() {
+function faceDocument() {
     return {
-        name: "overlay-html",
+        name: "face-html",
         writeBundle() {
-            const shellPath = join(pkgRoot, "dist", "overlay-shell.cjs");
+            const shellPath = join(pkgRoot, "dist", "face-shell.cjs");
             delete require.cache[require.resolve(shellPath)];
-            const { overlayHtml } = require(shellPath);
+            const { faceHtml } = require(shellPath);
+            const font = readFileSync(
+                join(pkgRoot, "face", "fonts", "Fredoka-SemiBold-latin.woff2")
+            ).toString("base64");
+            const css = execFileSync(
+                join(pkgRoot, "node_modules", ".bin", "tailwindcss"),
+                ["-i", join(pkgRoot, "face", "face.css"), "--minify"],
+                {
+                    cwd: pkgRoot,
+                    encoding: "utf8",
+                    stdio: ["ignore", "pipe", "ignore"],
+                }
+            )
+                .replace(/^\/\*![^*]*\*\/\s*/, "")
+                .replace("__SPIN_FONT__", `data:font/woff2;base64,${font}`);
+            // Each spin writes a fresh copy of this page to the board, so it ships minified.
+            const js = transformSync(readBuiltJs("face.js"), {
+                minify: true,
+                target: "es2022",
+            }).code.replaceAll("</script", "<\\/script");
             writeGenerated(
-                "overlay-html.ts",
-                "OVERLAY_HTML",
-                overlayHtml(readBuiltJs("overlay.js"))
+                "face-html.ts",
+                "FACE_HTML",
+                faceHtml(js.trim(), css.trim())
             );
         },
     };
 }
 
-const overlay = {
-    input: "overlay/main.ts",
+const face = {
+    input: "face/main.ts",
     output: {
-        file: "dist/overlay.js",
+        file: "dist/face.js",
         format: "iife",
     },
-    plugins: [typescript({ tsconfig: join(pkgRoot, "tsconfig.json") })],
+    plugins: [
+        typescript({
+            tsconfig: join(pkgRoot, "tsconfig.json"),
+            compilerOptions: { removeComments: true },
+        }),
+    ],
 };
 
-const overlayShell = {
-    input: "overlay/shell.ts",
+const faceShell = {
+    input: "face/shell.ts",
     output: {
-        file: "dist/overlay-shell.cjs",
+        file: "dist/face-shell.cjs",
         format: "cjs",
         exports: "named",
     },
     plugins: [
         typescript({ tsconfig: join(pkgRoot, "tsconfig.json") }),
-        overlayDocument(),
+        faceDocument(),
     ],
 };
 
@@ -139,4 +165,4 @@ const driver = {
     plugins: [typescript({ tsconfig: join(pkgRoot, "tsconfig.json") })],
 };
 
-export default [webview, shell, overlay, overlayShell, driver];
+export default [webview, shell, face, faceShell, driver];

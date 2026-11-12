@@ -3,43 +3,138 @@ import type {
     DriverManifest,
     DriverModule,
 } from "@drawdy/driver-protocol";
-import type { OverlayConfig } from "../src/lib/overlay-layout";
 import { overlaps, type Rect } from "../src/lib/free-spot";
 
-export const MANIFEST = {
-    driverId: "mickyngub.spin",
-    driverName: "Spin",
-} as DriverManifest;
-export const WEBVIEW_ID = "mickyngub.spin:webview";
-export const BUTTON_ID = "mickyngub.spin:action-button";
+export const START = Date.UTC(2026, 10, 12, 14, 0, 0);
+export const DRIVER_ID = "mickyngub.spin";
 
-export type Stored = Record<string, any> & {
-    drawdyElementId: string;
+export type Stored = Record<string, unknown> & {
+    id: string;
     type: string;
+    meta?: Record<string, unknown>;
 };
 
-type Sent = { type: string; req?: any };
+type Version = { el: Stored | null; seq: number };
+type Event = { type: string; subscriptionId: string; body?: unknown };
 
-type User = { name: string; isSelf?: boolean; isHost?: boolean };
+export async function settle(): Promise<void> {
+    for (let i = 0; i < 25; i++)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+}
 
-/** The board everyone shares: whole elements, last write wins, like Drawdy's Yjs map. */
-export function fakeBoard() {
-    const elements = new Map<string, Stored>();
-    const hosts: { receive(type: string, elements: Stored[]): void }[] = [];
-    let pending: Promise<unknown>[] = [];
+export function fakeClock(start = START) {
+    let now = start;
+    let ids = 0;
+    const timers = new Map<number, { at: number; fn: () => void }>();
     return {
-        elements,
-        hosts,
-        track(p: Promise<unknown>) {
-            pending.push(p);
+        now: () => now,
+        setTimeout: (fn: () => void, ms: number) => {
+            const id = ++ids;
+            timers.set(id, { at: now + Math.max(0, ms), fn });
+            return id;
         },
-        async flush() {
-            for (let i = 0; i < 20; i++) {
-                const now = pending;
-                pending = [];
-                await Promise.all(now);
-                await new Promise((r) => setImmediate(r));
-                if (pending.length === 0) return;
+        clearTimeout: (id: unknown) => {
+            timers.delete(id as number);
+        },
+        pending: () => timers.size,
+        async advance(ms: number, after: () => Promise<void> = settle) {
+            const end = now + ms;
+            for (;;) {
+                let next: [number, { at: number; fn: () => void }] | null =
+                    null;
+                for (const entry of timers)
+                    if (
+                        entry[1].at <= end &&
+                        (!next || entry[1].at < next[1].at)
+                    )
+                        next = entry;
+                if (!next) break;
+                timers.delete(next[0]);
+                now = next[1].at;
+                next[1].fn();
+                await after();
+            }
+            now = end;
+            await after();
+        },
+    };
+}
+
+export type FakeClock = ReturnType<typeof fakeClock>;
+
+type Client = {
+    replica: Map<string, Version>;
+    emit: (type: string, elements: Stored[]) => void;
+    drain: () => Promise<boolean>;
+};
+
+/**
+ * One board shared by several clients. Each client edits its own replica and
+ * sends the whole element on; a replica keeps whichever write the board
+ * ordered last, the way Drawdy stores elements.
+ */
+export function fakeBoard() {
+    let seq = 0;
+    let holding = false;
+    const clients: Client[] = [];
+    const network: { to: Client; id: string; version: Version }[] = [];
+
+    const apply = (client: Client, id: string, version: Version) => {
+        const current = client.replica.get(id);
+        if (current && current.seq >= version.seq) return;
+        client.replica.set(id, version);
+        if (version.el === null) {
+            if (current?.el)
+                client.emit("subscription:scene:elements-removed", [
+                    current.el,
+                ]);
+        } else if (!current?.el) {
+            client.emit("subscription:scene:elements-added", [version.el]);
+        } else {
+            client.emit("subscription:scene:elements-updated", [version.el]);
+        }
+    };
+
+    const sync = () => {
+        while (network.length) {
+            const { to, id, version } = network.shift()!;
+            apply(to, id, version);
+        }
+    };
+
+    return {
+        clients,
+        join(client: Client) {
+            const source = clients[0];
+            clients.push(client);
+            if (source)
+                for (const [id, version] of source.replica)
+                    client.replica.set(id, structuredClone(version));
+        },
+        write(from: Client, id: string, el: Stored | null) {
+            const version: Version = { el, seq: ++seq };
+            apply(from, id, version);
+            for (const to of clients)
+                if (to !== from)
+                    network.push({ to, id, version: structuredClone(version) });
+            if (!holding) sync();
+        },
+        /** Stops delivery between clients, so their next writes cross on the wire. */
+        hold() {
+            holding = true;
+        },
+        release() {
+            holding = false;
+            sync();
+        },
+        async settle() {
+            for (let round = 0; round < 50; round++) {
+                if (!holding) sync();
+                let busy = false;
+                for (const client of clients)
+                    if (await client.drain()) busy = true;
+                await settle();
+                if (!busy && (holding || network.length === 0)) return;
             }
         },
     };
@@ -47,61 +142,87 @@ export function fakeBoard() {
 
 export type FakeBoard = ReturnType<typeof fakeBoard>;
 
-const rectOf = (el: Stored): Rect => ({
-    x: el.x,
-    y: el.y,
-    width: el.width ?? 200,
-    height: el.height ?? 193,
-});
-
-function picked(el: Stored, properties: string[]): Record<string, unknown> {
-    const out: Record<string, unknown> = { id: el.drawdyElementId };
-    for (const key of properties) {
-        if (key === "type") out.type = el.type === "shape" ? "path" : el.type;
-        else if (key === "componentType") {
-            if (el.type === "shape")
-                out.componentType = el.componentType ?? "rect";
-        } else if (key === "opacity") out.opacity = el.opacity ?? 1;
-        else if (el[key] !== undefined) out[key] = el[key];
-    }
-    return out;
-}
-
 type Options = {
     board?: FakeBoard;
     viewport?: Rect;
-    users?: User[];
+    zoom?: number;
+    kv?: Map<string, Record<string, unknown>>;
     denied?: string[];
-    addError?: string;
-    selection?: string[];
-    kv?: Record<string, Record<string, unknown>>;
+    users?: { name: string }[];
 };
+
+const pickOf = (el: Stored, properties: string[]) => {
+    const picked: Record<string, unknown> = { id: el.id };
+    for (const key of properties)
+        if (el[key] !== undefined) picked[key] = el[key];
+    return picked;
+};
+
+const rectOf = (el: Stored): Rect => ({
+    x: el.x as number,
+    y: el.y as number,
+    width: el.width as number,
+    height: el.height as number,
+});
 
 export function fakeHost(options: Options = {}) {
     const board = options.board ?? fakeBoard();
-    const viewport = options.viewport ?? {
+    let viewport = options.viewport ?? {
         x: 0,
         y: 0,
         width: 1600,
         height: 1000,
     };
-    const sent: Sent[] = [];
+    const zoom = options.zoom ?? 1;
+    const listening = new Set<string>();
+    const kv = options.kv ?? new Map<string, Record<string, unknown>>();
+    const sent: { type: string; req?: any }[] = [];
     const posted: any[] = [];
-    const floating = new Map<string, any>();
-    const removed: string[] = [];
-    const subs = new Map<string, string>();
-    const subProps = new Map<string, string[]>();
-    const kv = new Map(Object.entries(options.kv ?? {}));
-    let selection = options.selection ?? [];
-    let panel = false;
+    const inbox: Event[] = [];
+    const elementProperties: string[] = [];
     let module: DriverModule | null = null;
-    let subNo = 0;
+    let selection: string[] = [];
+    let webview = false;
 
-    const deliver = (type: string, body: unknown) => {
-        const subscriptionId = subs.get(type);
-        if (!subscriptionId || !module) return;
-        board.track(module.onEvent({ type, subscriptionId, body } as any));
+    const client: Client = {
+        replica: new Map(),
+        emit(type, elements) {
+            if (elementProperties.length === 0) return;
+            inbox.push({
+                type,
+                subscriptionId: type,
+                body: {
+                    drawdyElements: elements.map((el) =>
+                        pickOf(el, elementProperties)
+                    ),
+                    properties: elementProperties,
+                },
+            });
+        },
+        async drain() {
+            if (!module || inbox.length === 0) return false;
+            while (inbox.length) await module.onEvent(inbox.shift() as any);
+            return true;
+        },
     };
+    board.join(client);
+
+    const live = (): Stored[] =>
+        [...client.replica.values()].flatMap((v) => (v.el ? [v.el] : []));
+    const element = (id: string): Stored | null =>
+        client.replica.get(id)?.el ?? null;
+
+    function select(next: string[]) {
+        selection = [...next];
+        inbox.push({
+            type: "subscription:scene:drawdy-element-selection",
+            subscriptionId: "selection",
+            body: { drawdyElementIds: selection },
+        });
+    }
+
+    const push = (type: string, body: unknown) =>
+        inbox.push({ type, subscriptionId: type, body });
 
     const issueCommand = (async (cmd: any) => {
         sent.push({ type: cmd.type, req: cmd.req });
@@ -109,223 +230,191 @@ export function fakeHost(options: Options = {}) {
         const fail = (type: string) => ({ ...cmd, res: { error: { type } } });
         if (options.denied?.some((prefix) => cmd.type.startsWith(prefix)))
             return fail("unauthorized");
-        if (cmd.type.startsWith("subscription:")) {
-            const subscriptionId = `sub-${++subNo}`;
-            subs.set(cmd.type, subscriptionId);
-            subProps.set(cmd.type, cmd.req?.properties ?? []);
-            return ok({ subscriptionId });
-        }
+        const req = cmd.req;
         switch (cmd.type) {
             case "command:dom:create-action-button":
                 return ok({ created: true });
-            case "command:webview:create":
-                panel = true;
-                return ok({ created: true });
+            case "command:webview:create": {
+                const created = !webview;
+                webview = true;
+                return ok({ created });
+            }
             case "command:webview:post-message":
-                if (panel) posted.push(cmd.req.message);
-                return ok({ posted: panel });
+                posted.push(structuredClone(req.message));
+                return ok({ posted: webview });
+            case "command:dom:element-rect":
+                return fail("not-found");
+            case "command:kv-storage:get":
+                return ok({ got: kv.get(req.key) });
+            case "command:kv-storage:set":
+                kv.set(req.key, structuredClone(req.payload));
+                return ok();
             case "command:camera:get-viewport-rect":
                 return ok({ rect: viewport });
             case "command:camera:get-info":
-                return ok({ x: 0, y: 0, zoom: 1 });
-            case "command:camera:canvas-to-screen":
-                return ok({
-                    x: cmd.req.x - viewport.x,
-                    y: cmd.req.y - viewport.y,
-                });
+                return ok({ x: 0, y: 0, zoom });
             case "command:camera:screen-to-canvas":
                 return ok({
-                    x: cmd.req.x + viewport.x,
-                    y: cmd.req.y + viewport.y,
+                    x: viewport.x + req.x / zoom,
+                    y: viewport.y + req.y / zoom,
                 });
-            case "command:dom:element-rect":
-                return panel && cmd.req.elementId === WEBVIEW_ID
-                    ? ok({
-                          x: viewport.width - 336,
-                          y: 64,
-                          width: 320,
-                          height: 500,
-                      })
-                    : fail("not-found");
-            case "command:dom:create-floating-element":
-                floating.set(cmd.req.domId, cmd.req);
-                return ok({ created: true });
-            case "command:dom:remove-floating-element": {
-                const had = floating.delete(cmd.req.domId);
-                if (had) removed.push(cmd.req.domId);
-                return ok({ removed: had });
-            }
-            case "command:scene:query-rect":
-                return ok({
-                    drawdyElements: [...board.elements.values()]
-                        .filter((el) => overlaps(rectOf(el), cmd.req.rect))
-                        .map((el) => picked(el, ["type"])),
-                });
-            case "command:scene:element-rects":
-                return ok({
-                    rects: (cmd.req.drawdyElementIds as string[]).flatMap(
-                        (id) => {
-                            const el = board.elements.get(id);
-                            return el
-                                ? [{ drawdyElementId: id, rect: rectOf(el) }]
-                                : [];
-                        }
-                    ),
-                });
-            case "command:scene:add-drawdy-elements": {
-                if (options.addError) return fail(options.addError);
-                const added = (cmd.req.elements as Stored[]).map((el) => ({
-                    ...el,
-                }));
-                for (const el of added)
-                    board.elements.set(el.drawdyElementId, el);
-                for (const host of board.hosts)
-                    host.receive("subscription:scene:elements-added", added);
-                return ok();
-            }
-            case "command:scene:update-drawdy-elements": {
-                let updated = 0;
-                for (const { drawdyElementId, properties } of cmd.req.updates) {
-                    const el = board.elements.get(drawdyElementId);
-                    if (!el) continue;
-                    const { meta, transform, ...rest } = properties;
-                    board.elements.set(drawdyElementId, {
-                        ...el,
-                        ...rest,
-                        ...(transform ?? {}),
-                        ...(meta ? { meta: { ...el.meta, ...meta } } : {}),
-                    });
-                    updated++;
-                }
-                return ok({ updated });
-            }
-            case "command:scene:get-drawdy-elements": {
-                const ids: string[] | undefined = cmd.req.drawdyElementIds;
-                const els = ids
-                    ? ids.flatMap((id) => {
-                          const el = board.elements.get(id);
-                          return el ? [el] : [];
-                      })
-                    : [...board.elements.values()];
-                return ok({
-                    drawdyElements: els.map((el) =>
-                        picked(el, cmd.req.properties)
-                    ),
-                });
-            }
-            case "command:scene:get-current-selected-drawdy-elements":
-                return ok({ drawdyElementIds: selection });
-            case "command:scene:set-selection":
-                selection = cmd.req.drawdyElementIds;
-                return ok();
-            case "command:kv-storage:get":
-                return ok({ got: kv.get(cmd.req.key) });
-            case "command:kv-storage:set":
-                kv.set(cmd.req.key, cmd.req.payload);
+            case "command:camera:fly-to-rect":
                 return ok();
             case "command:collaboration:get-all-users-in-board":
                 return ok({
-                    users: (
-                        options.users ?? [{ name: "Me", isSelf: true }]
-                    ).map((u, i) => ({
+                    users: (options.users ?? [{ name: "Me" }]).map((u, i) => ({
                         id: `u${i}`,
                         color: "#000",
-                        isHost: u.isHost ?? i === 0,
-                        isSelf: u.isSelf ?? i === 0,
+                        isHost: i === 0,
+                        isSelf: i === 0,
                         cursorPosition: null,
                         name: u.name,
                     })),
                 });
+            case "command:scene:get-drawdy-elements": {
+                const wanted: string[] | undefined = req.drawdyElementIds;
+                const els = wanted
+                    ? wanted.flatMap((id) => element(id) ?? [])
+                    : live();
+                return ok({
+                    drawdyElements: els.map((el) => pickOf(el, req.properties)),
+                });
+            }
+            case "command:scene:add-drawdy-elements":
+                for (const raw of req.elements) {
+                    const { drawdyElementId: id, ...rest } =
+                        structuredClone(raw);
+                    board.write(client, id, { ...rest, id });
+                }
+                return ok();
+            case "command:scene:remove-drawdy-elements": {
+                let removed = 0;
+                for (const id of req.drawdyElementIds as string[]) {
+                    if (!element(id)) continue;
+                    board.write(client, id, null);
+                    removed++;
+                }
+                return ok({ removed });
+            }
+            case "command:scene:query-rect":
+                return ok({
+                    drawdyElements: live()
+                        .filter((el) => overlaps(rectOf(el), req.rect))
+                        .map((el) => ({ id: el.id, type: el.type })),
+                });
+            case "command:scene:element-rects":
+                return ok({
+                    rects: (req.drawdyElementIds as string[]).flatMap((id) => {
+                        const el = element(id);
+                        return el
+                            ? [{ drawdyElementId: id, rect: rectOf(el) }]
+                            : [];
+                    }),
+                });
+            case "command:scene:set-selection":
+                select(req.drawdyElementIds);
+                return ok();
+            case "command:scene:get-current-selected-drawdy-elements":
+                return ok({ drawdyElementIds: selection });
             default:
-                return ok({});
+                if (
+                    cmd.type.startsWith("subscription:scene:elements-") &&
+                    elementProperties.length === 0
+                )
+                    elementProperties.push(...req.properties);
+                if (cmd.type.startsWith("subscription:"))
+                    listening.add(cmd.type);
+                return ok(
+                    cmd.type.startsWith("subscription:")
+                        ? { subscriptionId: cmd.type }
+                        : {}
+                );
         }
     }) as unknown as DriverCommandIssuer;
 
-    let ids = 0;
-    const host = {
-        issueCommand,
+    return {
+        board,
         sent,
         posted,
-        floating,
-        removed,
         kv,
-        board,
-        get selection() {
-            return selection;
-        },
-        nextId: () => `card-${Math.random().toString(36).slice(2, 8)}-${++ids}`,
-        types: () => sent.map((s) => s.type),
-        sentOf: (type: string) => sent.filter((s) => s.type === type),
-        postedOf: (type: string) => posted.filter((m) => m.type === type),
-        overlays: () => [...floating.values()],
-        attach(m: DriverModule) {
-            module = m;
-        },
-        /** Delivers an element event the way Drawdy does, filtered to the subscribed properties. */
-        receive(type: string, elements: Stored[]) {
-            if (!subs.has(type)) return;
-            const properties = subProps.get(type) ?? [];
-            deliver(type, {
-                drawdyElements: elements.map((el) => picked(el, properties)),
-                properties,
+        live,
+        element,
+        async boot(
+            driver: DriverModule,
+            manifest: DriverManifest,
+            theme: "light" | "dark" = "dark"
+        ) {
+            module = driver;
+            let local = 0;
+            const prefix = `c${board.clients.indexOf(client)}`;
+            await driver.activate({
+                manifest,
+                issueCommand,
+                styling: { theme, tokens: {} } as any,
+                generateId: () => `${prefix}-el-${++local}`,
             });
+            await board.settle();
         },
-        event(type: string, body: unknown) {
-            deliver(type, body);
+        clickButton: () =>
+            push("subscription:dom:element-clicked", {
+                domElementId: `${DRIVER_ID}:action-button`,
+                clientX: 0,
+                clientY: 0,
+            }),
+        /**
+         * A press and release on the board with the select tool, as Drawdy
+         * reports it: the pointer down, the element under it selected, then a
+         * click on whatever is under both points. `to` drags in between.
+         */
+        clickAt(at: { x: number; y: number }, to = at) {
+            const under = (p: { x: number; y: number }) =>
+                live()
+                    .filter((el) =>
+                        overlaps(rectOf(el), { ...p, width: 0, height: 0 })
+                    )
+                    .map((el) => el.id);
+            const cursor = (p: { x: number; y: number }) => ({
+                canvasSpace: p,
+                domSpace: {
+                    x: (p.x - viewport.x) * zoom,
+                    y: (p.y - viewport.y) * zoom,
+                },
+            });
+            const down = under(at);
+            if (listening.has("subscription:scene:pointer"))
+                push("subscription:scene:pointer", {
+                    type: "down",
+                    drawdyElementIds: down,
+                    pressure: 0.5,
+                    cursor: cursor(at),
+                });
+            if (down.length) select([down.at(-1)!]);
+            const up = new Set(under(to));
+            const clicked = down.filter((id) => up.has(id));
+            if (clicked.length && listening.has("subscription:scene:click"))
+                push("subscription:scene:click", {
+                    drawdyElementIds: clicked,
+                    cursor: cursor(to),
+                });
+        },
+        pan(rect: Rect) {
+            viewport = rect;
+        },
+        message: (message: Record<string, unknown>) =>
+            push("subscription:webview:message", {
+                webviewDomId: `${DRIVER_ID}:webview`,
+                message,
+            }),
+        select,
+        /** Undo puts the element back the way it was, as one whole-element write. */
+        restore(snapshot: Stored) {
+            board.write(client, snapshot.id, structuredClone(snapshot));
         },
         clear() {
             sent.length = 0;
             posted.length = 0;
         },
     };
-    board.hosts.push(host);
-    return host;
 }
 
 export type FakeHost = ReturnType<typeof fakeHost>;
-
-export async function boot(
-    module: DriverModule,
-    host: FakeHost,
-    styling: Record<string, unknown> = { theme: "dark" }
-) {
-    host.attach(module);
-    await module.activate({
-        manifest: MANIFEST,
-        issueCommand: host.issueCommand,
-        styling: styling as any,
-        generateId: host.nextId,
-    });
-    const click = () =>
-        module.onEvent({
-            type: "subscription:dom:element-clicked",
-            body: { domElementId: BUTTON_ID },
-        } as any);
-    const message = async (body: Record<string, unknown>) => {
-        await module.onEvent({
-            type: "subscription:webview:message",
-            body: { webviewDomId: WEBVIEW_ID, message: body },
-        } as any);
-        await host.board.flush();
-    };
-    const open = async () => {
-        await click();
-        await message({ type: "ready" });
-    };
-    return { click, message, open };
-}
-
-export function overlayConfig(req: any): OverlayConfig {
-    const doc: string = req.schema.child.srcDoc;
-    const match =
-        /<script type="application\/json" id="spin-config">([\s\S]*?)<\/script>/.exec(
-            doc
-        );
-    if (!match) throw new Error("the overlay carries no spin config");
-    return JSON.parse(match[1]) as OverlayConfig;
-}
-
-export const cards = (board: FakeBoard) =>
-    [...board.elements.values()].filter(
-        (el) => el.meta?.[MANIFEST.driverId] !== undefined
-    );
