@@ -4,7 +4,7 @@
 
 A picker wheel that lives on your board, so everyone in the session watches the same spin. Fill it with names, lunch ideas or warm-up questions, press **Spin** in the middle, and every screen sees it slow down, wobble past and land on the same pick ✧
 
-![Clicking the wheel in the rail drops a wheel of lunch ideas on the board; pressing Spin in its middle turns it until it lands on Curry with confetti and a Picked ribbon, then names are pasted into the panel and the wheel spins again, with each winner leaving the wheel](https://raw.githubusercontent.com/mickyngub/drawdy-spin/main/docs/media/spin.gif)
+![Clicking the wheel in the rail opens the panel and drops a wheel of lunch ideas on the board; pressing Spin in its middle turns the wheel until it lands on Burger with confetti and a Picked Burger ribbon; then Yes or no in the panel turns it into a two-slice wheel, and pressing Spin again lands on Yes](https://raw.githubusercontent.com/mickyngub/drawdy-spin/main/docs/media/spin.gif)
 
 ---
 
